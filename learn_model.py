@@ -63,18 +63,14 @@ def parse_args():
     return options
 
 def select_transcripts(options):
-    raise NotImplementedError
     
     # load all transcripts
     transcript_models = load_data.load_transcripts(options.gtf_input_file)
+    T = len(transcript_models)
 
     # get translation level in all transcripts
-    transcript_counts = []
-    bamhandle =
-    for transcript in transcript_models:
-
-
-    bamhandle.close()
+    ribo_track = load_data.RiboSeq(options.riboseq_bam_file)
+    transcript_total_counts = ribo_track.get_total_counts(transcripts)
 
     # select top transcripts
     transcripts = []
@@ -82,8 +78,14 @@ def select_transcripts(options):
     order = np.argsort(transcript_counts)[::-1]
     for index in order:
         transcript = transcript_models[index]
+ 
+        # check if all exons have at least 5 footprints
+        exon_counts = ribo_track.get_exon_total_counts([transcript])[0]
+        if np.any(exon_counts<5):
+            continue
 
-        # test if transcript overlaps any previous transcript
+        # check if transcript overlaps any previous transcript
+        # filter out strict overlaps
         overlap = False
         try:
             for bound in transcript_bounds[transcript.chromosome]:
@@ -92,12 +94,15 @@ def select_transcripts(options):
                     break
         except KeyError:
             pass
+        if overlap:
+            continue
 
-        if not overlap:
-            transcripts.append(transcript)
-            transcript_bounds[transcript.chromosome].append([transcript.start, transcript.stop])
-            if len(transcripts)>=options.batch:
-                break
+        transcripts.append(transcript)
+        transcript_bounds[transcript.chromosome].append([transcript.start, transcript.stop])
+
+        # select fixed number of transcripts for learning
+        if len(transcripts)>=options.batch:
+            break
 
     return transcripts
 
@@ -105,23 +110,24 @@ def learn(options):
 
     # select transcripts for learning parameters
     transcripts = select_transcripts(options)
+    print "Selected %d transcripts"%(len(transcripts))
 
     # load footprint count data in transcripts
     ribo_track = load_data.RiboSeq(options.riboseq_bam_file)
-    countdata = ribo_track.get_counts(transcripts)
-    footprint_counts = [np.array(d).T.astype(np.uint64) for d in zip(*readdata)]
+    footprint_counts = ribo_track.get_counts(transcripts)
     ribo_track.close()
+    print "%d footprints in data"%(np.sum([c.sum() for c in footprint_counts]))
 
-    # load rnaseq count data in transcripts
+    # load transcript-level rnaseq RPKM
     if options.rnaseq_bam_file is not None:
         rnaseq_track = load_data.RnaSeq(options.rnaseq_bam_file)
-        rna_counts = rnaseq_track.get_counts(transcripts)
+        rna_counts = rnaseq_track.get_total_counts(transcripts)
         rnaseq_track.close()
     else:
         rna_counts = None
 
     # load pre-computed Kozak model
-    kozak_model = np.load("%s/cache/kozak_sequence.npz"%utils.PATH)
+    kozak_model = np.load("data/kozak_model.npz")
     freq = dict([(char,row) for char,row in zip(['A','U','G','C'],kozak_model['freq'])])
     altfreq = dict([(char,row) for char,row in zip(['A','U','G','C'],kozak_model['altfreq'])])
     kozak_data.close()
@@ -137,6 +143,7 @@ def learn(options):
         for sequence in rna_sequences]
     total_bases = np.sum([len(seq) for seq in rna_sequences])
     del sequences
+    print "%d bases covered"%total_bases
 
     # load mappability of transcripts; transform mappability to missingness
     if options.mappability_file is not None:
@@ -148,7 +155,6 @@ def learn(options):
     genome_track.close()
 
     # run the learning algorithm
-    print "Learning using %d transcripts, %d footprints covering %d bases"%(len(transcripts),total_footprints,total_bases)
     transition, emission = ribohmm.learn_parameters(footprint_counts, codon_id, \
         rna_counts, missing, options.restarts, options.mintol)
 

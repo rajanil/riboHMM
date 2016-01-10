@@ -1,257 +1,186 @@
 import numpy as np
+import pysam
 import utils
+
+MIN_MAP_QUAL = 10
 
 class Genome():
 
-    def __init__(self, fasta_file, map_file):
+    def __init__(self, fasta_filename, map_filename):
 
-        self._seq_track = gdb.open_track("seq")
-        self._map_tracks = dict()
-        for rlen in utils.READ_LENGTHS:
-            self._map_tracks[rlen] = gdb.open_track("riboseq/mappability_%dbp"%rlen)
-        self._cons_track = gdb.open_track("phastcons/placental_46way")
+        self._seq_handle = pysam.FastaFile(fasta_filename)
 
-        self.genome = dict()
-        self.mappability = dict([(rlen,dict()) for rlen in utils.READ_LENGTHS])
-        self.conservation = dict()
-        for chromosome in chromosomes:
-            self.genome[chromosome.name] = self._seq_track.get_array(chromosome.name)
-            for rlen,track in self._map_tracks.iteritems():
-                self.mappability[rlen][chromosome.name] = track.get_array(chromosome.name)
-            try:
-                self.conservation[chromosome.name] = self._cons_track.get_array(chromosome.name)
-            except AttributeError:
-                pass
+    def get_sequence(self, transcripts):
 
-    def get_sequence(self, transcripts, CDSstart=False, CDSstop=False, short=4, long=30):
-
-        if CDSstart:
-            offset = 0 #12
-            left = short
-            right = long
-        elif CDSstop:
-            offset = 0 #15
-            right = short
-            left = long
-
-        seqs = []
+        sequences = []
         for transcript in transcripts:
-            seq = self.genome[transcript.chromosome][transcript.start:transcript.stop]
+
+            # get DNA sequence
+            seq = self._seq_handle.fetch(transcript.chromsome, transcript.start, transcript.stop)
+
+            # get DNA sequence of transcript
+            # reverse complement, if necessary
             if transcript.strand=="-":
                 seq = seq[::-1]
-            seq = seq[transcript.mask]
-
-            L = seq.size
-            if CDSstart:
-                center = transcript.utr5
-                seq = seq[max([0,center-offset-left]):min([center-offset+right,L])]
-                if seq.size!=(left+right):
-                    seq = np.hstack((78*np.ones((left+right-seq.size,), dtype=np.uint16),seq))
-
-            elif CDSstop:
-                center = transcript.utr3
-                seq = seq[max([0,center-offset-left]):min([center-offset+right,L])]
-                if seq.size!=(left+right):
-                    seq = np.hstack((seq,78*np.ones((left+right-seq.size,),dtype=np.uint16)))
-
-            if transcript.strand=='-':
+                seq = seq[transcript.mask]
                 seq = utils.make_complement(seq)
-
-            seq = ['U' if utils.DNA_MAP[s]=='T' else utils.DNA_MAP[s] for s in seq]
-            seqs.append(''.join(seq))
-            
-        return seqs
-
-    def get_mappability(self, transcripts, CDSstart=False, CDSstop=False, short=4, long=30):
-
-        if CDSstart:
-            offset = 0 #12
-            left = short
-            right = long
-        elif CDSstop:
-            offset = 0 #15
-            right = short
-            left = long
-
-        mapps = []
-        for transcript in transcripts:
-            if transcript.strand=='+':
-                mapp = np.array([self.mappability[rlen][transcript.chromosome][transcript.start-12:transcript.stop-12][transcript.mask] for rlen in utils.READ_LENGTHS])
             else:
-                mapp = np.array([self.mappability[rlen][transcript.chromosome][transcript.start-rlen+1+12:transcript.stop-rlen+1+12][::-1][transcript.mask] for rlen in utils.READ_LENGTHS])
+                seq = seq[transcript.mask]
 
-            L = mapp.size
-            if CDSstart: 
-                center = transcript.utr5
-                mapp = mapp[:,max([0,center-offset-left]):min([center-offset+right,L])]
-                if mapp.shape[1]!=(left+right):
-                    mapp = np.hstack((-1*np.ones((len(utils.READ_LENGTHS),left+right-mapp.size), dtype=np.uint16),mapp))
-
-            elif CDSstop:
-                center = transcript.utr3
-                mapp = mapp[:,max([0,center-offset-left]):min([center-offset+right,L])]
-                if mapp.shape[1]!=(left+right):
-                    mapp = np.hstack((mapp,-1*np.ones((len(utils.READ_LENGTHS),left+right-mapp.size),dtype=np.uint16)))
-
-            mapps.append(mapp)
+            # get RNA sequence
+            seq = ''.join(['U' if s=='T' else s for s in seq])
+            sequences.append(seq)
             
-        return mapps
+        return sequences
+
+    def get_mappability(self, transcripts):
+
+        raise NotImplementedError
 
     def close(self):
 
-        self._seq_track.close()
-        for key,track in self._map_tracks.iteritems():
-            track.close()
-        self._cons_track.close()
+        self._seq_handle.close()
+        #self._map_handle.close()
 
 class RiboSeq():
 
-    def __init__(self, sample=None, treated=False):
+    def __init__(self, filename):
 
-        if treated:
-            self._fwd_track = gdb.open_track("riboseq/%s_treated_fwd"%sample)
-            self._rev_track = gdb.open_track("riboseq/%s_treated_rev"%sample)
-        else:
-            self._fwd_track = gdb.open_track("riboseq/%s_untreated_fwd"%sample)
-            self._rev_track = gdb.open_track("riboseq/%s_untreated_rev"%sample)
+        self.handle = pysam.Samfile(filename, "rb")
 
-        self.forward = dict()
-        self.reverse = dict()
+    def get_counts(self, transcripts):
 
-        for chromosome in chromosomes:
-            self.forward[chromosome.name] = self._fwd_track.get_array(chromosome.name)
-            self.reverse[chromosome.name] = self._rev_track.get_array(chromosome.name)
-        self.total = gdb.get_track_stat(self._fwd_track).sum + gdb.get_track_stat(self._rev_track).sum
-
-    def get_read(self, transcripts, CDSstart=False, CDSstop=False, CDScenter=False, short=51, long=54):
-
-        if CDSstart:
-            left = short
-            right = long
-        elif CDSstop:
-            right = short
-            left = long
-        elif CDScenter:
-            left = short
-            right = long
-
-        reads = []
+        read_counts = []
         for transcript in transcripts:
-            if transcript.strand=='+':
-                tread = self.forward[transcript.chromosome][transcript.start-12:transcript.stop-12][transcript.mask] #-12
-            else:
-                tread = self.reverse[transcript.chromosome][transcript.start+12:transcript.stop+12][::-1][transcript.mask] #+12
 
-            L = tread.size
-            if CDSstart:
-                center = transcript.utr5
-                read = tread[max([0,center-left]):min([center+right,L])]
-                if read.size!=(left+right):
-                    read = np.hstack((-1*np.ones((left+right-read.size,),dtype=np.uint16),read))
-                tread = read
+            counts = dict([(r,np.zeros(transcript.mask.shape, dtype='int')) for r in utils.READ_LENGTHS])
+            sam_iter = self._handle.fetch(reference=transcript.chromosome, start=transcript.start, end=transcript.stop)
 
-            elif CDSstop:
-                center = transcript.utr3
-                read = tread[max([0,center-left]):min([center+right,L])]
-                if read.size!=(left+right):
-                    read = np.hstack((read,-1*np.ones((left+right-read.size,),dtype=np.uint16)))
-                tread = read
+            for read in sam_iter:
 
-            elif CDScenter:
-                center = (transcript.utr5+transcript.utr3)/2+np.random.randint(0,3)
-                read = tread[max([0,center-left]):min([center+right,L])]
-                tread = read
+                # skip read if unmapped
+                if read.is_unmapped:
+                    continue
 
-            reads.append(tread)
+                # skip read, if mapping quality is low
+                if read.mapq < MIN_MAP_QUAL:
+                    continue
 
-        return reads
+                if transcript.strand=='+':
+                    # skip reverse strand reads
+                    if read.is_reverse:
+                        continue
+                    else:
+                        asite = read.positions[11]-transcript.start
+                else:
+                    # skip forward strand reads
+                    if not read.is_reverse:
+                        continue
+                    else:
+                        asite = transcript.stop-read.positions[-11]
 
-    def get_transcript_rpkm(self, transcripts, full=True):
+                # check if A-site is within transcript 
+                if asite>=0:
+                    # only keep footprints of specific lengths
+                    try:
+                        counts[read.rlen][asite] += 1
+                    except KeyError:
+                        pass
 
-        rpkm = self.get_read(transcripts)
-        if full:
-            rpkm = [r.sum()/float(t.mask.sum())/self.total*1.e9 for r,t in zip(rpkm,transcripts)]
-        else:
-            rpkm = [r[t.utr5:t.utr3].sum()/float(t.utr3-t.utr5)/self.total*1.e9 for r,t in zip(rpkm,transcripts)]
-        rpkm = np.array(rpkm)
-        return rpkm
+            read_counts.append(np.array([counts[r][transcript.mask] \
+                for r in utils.READ_LENGHTS]).T.astype(np.uint64))
 
-    def get_exon_totals(self, transcripts):
+        return read_counts
 
-        reads = []
+    def get_total_counts(self, transcripts):
+
+        read_counts = self.get_counts(transcripts)
+        total_counts = np.array([counts.sum() for counts in read_counts])
+        return total_counts
+
+    def get_exon_total_counts(self, transcripts):
+
+        exon_counts = []
         for transcript in transcripts:
-            if transcript.strand=='+':
-                read = self.forward[transcript.chromosome][transcript.start:transcript.stop]
-            else:
-                read = self.reverse[transcript.chromosome][transcript.start:transcript.stop]
-            counts = np.array([read[start+exten:end+exten].sum() for start,end in transcript.exons])
-            #counts[0] += read[:exten].sum()
-            #counts[-1] += read[-exten:].sum()
-            reads.append(counts)
 
-        return reads
+            counts = np.zeros(transcript.mask.shape, dtype='int')
+            sam_iter = self._handle.fetch(reference=transcript.chromosome, start=transcript.start, end=transcript.stop)
+
+            for read in sam_iter:
+
+                # skip read if unmapped
+                if read.is_unmapped:
+                    continue
+
+                # skip read, if mapping quality is low
+                if read.mapq < MIN_MAP_QUAL:
+                    continue
+
+                if transcript.strand=='+':
+                    # skip reverse strand reads
+                    if read.is_reverse:
+                        continue
+                    else:
+                        asite = read.positions[11]-transcript.start
+                else:
+                    # skip forward strand reads
+                    if not read.is_reverse:
+                        continue
+                    else:
+                        asite = read.positions[-11]-transcript.start
+
+                # check if A-site is within transcript 
+                if asite>=0:
+                    counts[asite] += 1
+
+            exon_counts.append(np.array([counts[start:end].sum() for start,end in transcript.exons])
+
+        return exon_counts
 
     def close(self):
 
-        self._fwd_track.close()
-        self._rev_track.close()
+        self.handle.close()
 
 class RnaSeq():
 
-    def __init__(self, sample=None):
+    def __init__(self, filename):
 
-        self._track = gdb.open_track(sample)
+        self.handle = pysam.Samfile(filename, "rb")
 
-        self.data = dict()
+    def get_total_counts(self, transcripts):
 
-        for chromosome in chromosomes:
-            self.data[chromosome.name] = self._track.get_array(chromosome.name)
-        self.total = gdb.get_track_stat(self._track).sum
-
-    def get_transcript_reads(self, transcripts):
-
-        reads = []
+        total_counts = []
         for transcript in transcripts:
-            exons = []
-            edges = list(np.where(np.logical_xor(transcript.mask[:-1],transcript.mask[1:]))[0]+1)
-            edges.insert(0,0)
-            edges.append(transcript.mask.size)
-            exons = [(edges[i],edges[i+1]) for i in xrange(0,len(edges),2)]
-            read = self.data[transcript.chromosome][transcript.start:transcript.stop]
-            if transcript.strand=='-':
-                read = read[::-1]
-            exonread = [read[e[0]:e[1]] for e in exons]
-            #read = np.hstack([np.max([1,e.sum()])*1.e6/float(e.size)/self.total*np.ones(e.shape) for e in exonread])
-            read = np.hstack(exonread)
-            read = np.max([1,read.sum()])*1.e6/float(read.size)/self.total #*np.ones(read.shape)
 
-            reads.append(read)
+            counts = 0
+            sam_iter = self._handle.fetch(reference=transcript.chromosome, start=transcript.start, end=transcript.stop)
+            if transcript.strand=='+':
+                mask = transcript.mask
+            else:
+                mask = transcript.mask[::-1]
 
-        return reads
+            for read in sam_iter:
 
-    def get_transcript_rpkm(self, transcripts, full=True):
+                # skip read if unmapped
+                if read.is_unmapped:
+                    continue
 
-        rpkm = [self.data[transcript.chromosome][transcript.start:transcript.stop][transcript.mask] \
-            for transcript in transcripts]
-        rpkm = [r.sum() for r in rpkm]
-        #if full:
-        #    rpkm = [max([1,r.sum()])/float(t.mask.sum())/self.total*1.e9 for r,t in zip(rpkm,transcripts)]
-        #else:
-        #    rpkm = [r[t.utr5:t.utr3].sum()/float(t.utr3-t.utr5)/self.total*1.e9 for r,t in zip(rpkm,transcripts)]
-        rpkm = np.array(rpkm)
-        return rpkm 
+                # skip read, if mapping quality is low
+                if read.mapq < MIN_MAP_QUAL:
+                    continue
 
-    def get_exon_totals(self, transcripts):
+                if read.is_reverse:
+                    site = read.pos - transcript.start
+                else:
+                    site = read.pos + read.alen - 1 - transcript.start
+                
+                if mask[site]:
+                    count += 1
 
-        reads = []
-        for transcript in transcripts:
-            read = self.data[transcript.chromosome][transcript.start:transcript.stop]
-            counts = np.array([read[start+exten:end+exten].sum() for start,end in transcript.exons])
-            #counts[0] += read[:exten].sum()
-            #counts[-1] += read[-exten:].sum()
-            reads.append(counts+1)
+            total_counts.append(max([1,count])*1e6/transcript.L/self.total)
 
-        return reads
+        total_counts = np.array(total_counts)
+        return total_counts
 
     def close(self):
 
