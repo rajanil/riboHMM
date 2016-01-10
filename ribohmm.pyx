@@ -61,8 +61,8 @@ cdef class Data:
         self.total = np.empty((3,self.M,self.R), dtype=np.uint64)
         for f from 0 <= f < 3:
             for r from 0 <= r < self.R:
-                for m from 0 <= m < self.M:
-                    self.total[f,m,r] = self.obs[3*m+f:3*m+3+f,r].sum()
+                self.total[f,:,r] = np.array([self.obs[3*m+f:3*m+3+f,r][self.missing[3*m+f:3*m+3+f,r]].sum() \
+                    for m from 0 <= m < self.M])
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -83,18 +83,29 @@ cdef class Data:
 
                 log_likelihood = np.zeros((self.M,emission.S), dtype=np.float64)
 
-                # periodicity likelihood
-                count_data = np.array([self.obs[3*m+f:3*m+3+f,r] for m in xrange(self.M)]).astype(np.uint64)
-                log_likelihood += np.dot(count_data,emission.logperiodicity[r]) \
-                    + gammaln(self.total[f,:,r:r+1]+1) - utils.insum(gammaln(count_data+1),[1])
+                # periodicity likelihood, accounting for mappability
+                log_likelihood = gammaln(self.total[f,:,r:r+1]+1) - utils.insum(gammaln(count_data+1),[1])
+                log_likelihood += np.array([0 if np.all(self.missing[3*m+f:3*m+3+f,r]) else \
+                    self.obs[3*m+f:3*m+3+f,r][self.missing[3*m+f:3*m+3+f,r]] \
+                    * (emission.logperiodicity[r,self.missing[3*m+f:3*m+3+f,r],:] \
+                    - np.log(utils.insum(emission.periodicity[r,self.missing[3*m+f:3*m+3+f,r],:],[1]))) \
+                    if np.any(self.missing[3*m+f:3*m+3+f,r]) else \
+                    np.sum(self.obs[3*m+f:3*m+3+f,r]*emission.logperiodicity[r],1) \
+                    for m in xrange(self.M)])
 
-                if emission.start=='noncanonical':
-                    # abundance likelihood
+                if not emission.restrict:
+
+                    # occupancy likelihood, accounting for mappability
+                    scale = self.scale * np.array([np.zeros(emission.S) if np.all(self.missing[3*m+f:3*m+3+f,r]) \
+                        else emission.periodicity[r,self.missing[3*m+f:3*m+3+f,r],:].sum(0) for m in xrange(self.M)])
+                    missing = np.where(scale==0)[0].astype(np.int64)
+                    scale[missing] = 1e-8
                     rate_log_likelihood = emission.rate_alpha[r]*emission.rate_beta[r]*utils.nplog(emission.rate_beta[r]) \
-                        - (emission.rate_alpha[r]*emission.rate_beta[r]+self.total[f,:,r:r+1])*utils.nplog(emission.rate_beta[r]+self.scale) \
+                        - (emission.rate_alpha[r]*emission.rate_beta[r]+self.total[f,:,r:r+1])*utils.nplog(emission.rate_beta[r]+scale) \
                         + gammaln(emission.rate_alpha[r]*emission.rate_beta[r]+self.total[f,:,r:r+1]) \
                         - gammaln(emission.rate_alpha[r]*emission.rate_beta[r]) \
-                        + self.total[f,:,r:r+1]*utils.nplog(self.scale) - gammaln(self.total[f,:,r:r+1]+1)
+                        + self.total[f,:,r:r+1]*utils.nplog(scale) - gammaln(self.total[f,:,r:r+1]+1)
+                    rate_log_likelihood[missing] = 0
                     log_likelihood += rate_log_likelihood
 
                     # likelihood of extra positions
@@ -113,12 +124,9 @@ cdef class Data:
                                     - gammaln(emission.rate_alpha[r,emission.S-1]*emission.rate_beta[r,emission.S-1]) \
                                     + self.obs[l,r]*utils.nplog(self.scale/3.) - gammaln(self.obs[l,r]+1)
 
-                # account for mappability in main positions
-                missing = np.array([m for m in xrange(self.M) if np.any(self.missing[3*m+f:3*m+3+f,r])]).astype(np.int64)
-                log_likelihood[missing,:] = 0
-
                 self.log_likelihood[f] += log_likelihood
    
+        # check for infs or nans in log likelihood
         if np.isnan(self.log_likelihood).any() \
         or np.isinf(self.log_likelihood).any():
             print "Warning: Inf/Nan in data log likelihood"
@@ -539,23 +547,24 @@ def rebuild_State(bstart, bstop, mposterior, M):
 
 cdef class Transition:
 
-    def __cinit__(self, start, stop):
+    def __cinit__(self):
         """Order of the states is
-            9 states: {'5UTR','pre-TSS','TSS','post-TSS','CDS','pre-TES','TES','post-TES','3UTR'}
+        '5UTS','5UTS+','TIS','TIS+','TES','TTS-','TTS','3UTS-','3UTS'
         """
 
         self.S = 9
-        self.start = start
-        self.stop = stop
+        self.restrict = True
         self.C = len(set(utils.STARTS.values()))+1
 
         self.seqparam = dict()
-        # set start transition parameters
+
+        # initialize translation initiation parameters
         self.seqparam['kozak'] = 0
         self.seqparam['start'] = -1*np.random.rand(self.C)
         self.seqparam['start'][0] = utils.MIN
         self.seqparam['start'][1] = 1+np.random.rand()
-        # set stop transition parameters
+
+        # initialize translation termination parameters
         self.seqparam['stop'] = utils.MAX*np.ones((4,), dtype=np.float64)
         self.seqparam['stop'][0] = utils.MIN
 
@@ -572,10 +581,10 @@ cdef class Transition:
         cdef State state
         cdef Frame frame
 
-        # update 5'UTR -> pre-TSS transition parameter
+        # update 5'UTS -> 5'UTS+ transition parameter
         # warm start for the optimization
         optimized = False
-        if self.start=="canonical":
+        if self.restrict:
             xo = self.seqparam['start'][1:2]
         else:
             xo = np.hstack((self.seqparam['kozak'],self.seqparam['start'][1:]))
@@ -585,20 +594,21 @@ cdef class Transition:
 
         while not optimized:
             try:
-                x_final, optimized = optimize_transition_initiation(x_init, data, states, frames, self.start)
+                x_final, optimized = optimize_transition_initiation(x_init, data, states, frames, self.restrict)
                 if not optimized:
-                    # cold start
-                    x_init = x_init*(1+0.1*(np.random.rand(V,1)-0.5))
+                    # retry optimization with near cold start
+                    x_init = x_init*np.exp(np.random.normal(0,0.0001,V))
 
             except ValueError as err:
 
                 print err
                 pdb.set_trace()
-                # if any parameter becomes Inf or Nan during optimization,
+                # if hessian becomes negative definite, 
+                # or any parameter becomes Inf or Nan during optimization,
                 # re-optimize with a cold start
-                x_init = x_init*(1+0.1*(np.random.rand(V,1)-0.5))
+                x_init = x_init*np.exp(np.random.normal(0,0.0001,V))
 
-        if self.start=="canonical":
+        if self.restrict:
             self.seqparam['start'][1] = x_final[0]
         else:
             self.seqparam['start'][1:] = x_final[1:]
@@ -607,12 +617,12 @@ cdef class Transition:
     def __reduce__(self):
         return (rebuild_Transition, (self.seqparam, self.start, self.stop))
 
-def rebuild_Transition(seqparam, start, stop):
-    t = Transition(start, stop)
+def rebuild_Transition(seqparam):
+    t = Transition()
     t.seqparam = seqparam
     return t
 
-def optimize_transition_initiation(x_init, data, states, frames, start):
+def optimize_transition_initiation(x_init, data, states, frames, restrict):
 
     def func(x=None, z=None):
 
@@ -623,11 +633,11 @@ def optimize_transition_initiation(x_init, data, states, frames, start):
 
         if z is None:
             # compute likelihood function and gradient
-            results = transition_func_grad(xx, data, states, frames, start)
+            results = transition_func_grad(xx, data, states, frames, restrict)
             fd = results[0]
             Df = results[1]
 
-            # check for infs and nans
+            # check for infs and nans, in function and gradient
             if np.isnan(fd) or np.isinf(fd):
                 f = np.array([np.finfo(np.float32).max]).astype(np.float64)
             else:
@@ -641,12 +651,12 @@ def optimize_transition_initiation(x_init, data, states, frames, start):
 
         else:
             # compute likelihood function, gradient and hessian
-            results = transition_func_grad_hess(xx, data, states, frames, start)
+            results = transition_func_grad_hess(xx, data, states, frames, restrict)
             fd = results[0]
             Df = results[1]
             hess = results[2]
 
-            # check for infs and nans
+            # check for infs and nans, in function and gradient
             if np.isnan(fd) or np.isinf(fd):
                 f = np.array([np.finfo(np.float32).max]).astype(np.float64)
             else:
@@ -655,6 +665,7 @@ def optimize_transition_initiation(x_init, data, states, frames, start):
                 Df = -1 * np.finfo(np.float32).max * np.ones((1,xx.size), dtype=np.float64)
             else:
                 Df = Df.reshape(1,xx.size)
+
             # check if hessian is positive semi-definite
             eigs = np.linalg.eig(hess)
             if np.any(eigs[0]<0):
@@ -680,7 +691,7 @@ def optimize_transition_initiation(x_init, data, states, frames, start):
 @cython.wraparound(False)
 @cython.nonecheck(False)
 cdef tuple transition_func_grad(np.ndarray[np.float64_t, ndim=1] x, \
-list data, list states, list frames, str start):
+list data, list states, list frames, bool restrict):
 
     cdef Data datum
     cdef State state
@@ -691,7 +702,7 @@ list data, list states, list frames, str start):
 
     xex = np.zeros((len(utils.STARTCODONS)+1,), dtype=np.float64)
     xex[0] = utils.MIN
-    if start=='canonical':
+    if restrict:
         xex[1] = x[0]
         xex[2:] = utils.MIN
     else:
@@ -704,7 +715,7 @@ list data, list states, list frames, str start):
 
         for j from 0 <= j < 3:
 
-            if start=='canonical':
+            if restrict:
                 arg = xex[datum.codon_id['start'][1:,j]]
             else:
                 arg = x[0]*datum.codon_id['kozak'][1:,j] + xex[datum.codon_id['start'][1:,j]]
@@ -716,7 +727,7 @@ list data, list states, list frames, str start):
             # evaluate gradient
             vec = state.pos_cross_moment_start[j,1:,0] \
                 - state.pos_cross_moment_start[j].sum(1)[1:]*logistic(-arg)
-            if start=='canonical':
+            if restrict:
                 tmp = datum.codon_id['start'][1:,j]==1
                 df[0] += frame.posterior[j] * np.sum(vec[tmp])
             else:
@@ -731,7 +742,7 @@ list data, list states, list frames, str start):
 @cython.wraparound(False)
 @cython.nonecheck(False)
 cdef tuple transition_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, \
-list data, list states, list frames, str start):
+list data, list states, list frames, bool restrict):
 
     cdef Data datum
     cdef State state
@@ -742,7 +753,7 @@ list data, list states, list frames, str start):
 
     xex = np.zeros((len(utils.STARTCODONS)+1,), dtype=np.float64)
     xex[0] = utils.MIN
-    if start=='canonical':
+    if restrict:
         xex[1] = x[0]
         xex[2:] = utils.MIN
     else:
@@ -757,7 +768,7 @@ list data, list states, list frames, str start):
 
         for j from 0 <= j < 3:
 
-            if start=='canonical':
+            if restrict:
                 arg = xex[datum.codon_id['start'][1:,j]]
             else:
                 arg = x[0]*datum.codon_id['kozak'][1:,j] + xex[datum.codon_id['start'][1:,j]]
@@ -766,11 +777,11 @@ list data, list states, list frames, str start):
             func += frame.posterior[j] * np.sum(state.pos_cross_moment_start[j,1:,0]*arg \
                 - state.pos_cross_moment_start[j].sum(1)[1:]*utils.nplog(1+np.exp(arg)))
 
-            # evaluate gradient
+            # evaluate gradient and hessian
             vec = state.pos_cross_moment_start[j,1:,0] \
                 - state.pos_cross_moment_start[j].sum(1)[1:]*logistic(-arg)
             vec2 = state.pos_cross_moment_start[j].sum(1)[1:]*logistic(arg)*logistic(-arg)
-            if start=='canonical':
+            if restrict:
                 tmp = datum.codon_id['start'][1:,j]==1
                 df[0] += frame.posterior[j] * np.sum(vec[tmp])
                 Hf[0,0] += frame.posterior[j] * np.sum(vec2[tmp])
@@ -783,34 +794,35 @@ list data, list states, list frames, str start):
                     Hf[v,v] += frame.posterior[j] * np.sum(vec2[tmp])
                     Hf[0,v] += frame.posterior[j] * np.sum(vec2[tmp]*datum.codon_id['kozak'][1:,j][tmp])
 
-    if start!='canonical':
+    if not restrict:
         Hf[:,0] = Hf[0,:]
     return -1.*func, -1.*df, Hf
 
 cdef class Emission:
 
-    def __cinit__(self, start, alpha_scale):
+    def __cinit__(self):
 
         cdef long r
         cdef np.ndarray[np.float64_t, ndim=1] alpha_pattern
         cdef np.ndarray[np.float64_t, ndim=2] periodicity
 
-        self.start = start
+        self.restrict = True
         self.S = 9
         self.R = len(utils.READ_LENGTHS)
+        self.periodicity = np.empty((self.R,3,self.S), dtype=np.float64)
         self.logperiodicity = np.empty((self.R,3,self.S), dtype=np.float64)
         self.rate_alpha = np.empty((self.R,self.S), dtype=np.float64)
         self.rate_beta = np.empty((self.R,self.S), dtype=np.float64)
-        alpha_pattern = np.array([1.,1.5,4.,6.,3.,6.,4.,1.,0.05])
+        alpha_pattern = np.array([1.,1.5,4.,6.,3.,6.,4.,1.,0.05])*100
 
         for r from 0 <= r < self.R:
 
             periodicity = np.ones((3,self.S), dtype=np.float64)
             periodicity[:,1:self.S-1] = np.random.rand(self.S-2)
-            periodicity = periodicity/periodicity.sum(0)
-            self.logperiodicity[r] = np.log(periodicity)
+            self.periodicity[r] = periodicity/periodicity.sum(0)
+            self.logperiodicity[r] = np.log(self.periodicity[r])
 
-            self.rate_alpha[r] = alpha_scale*alpha_pattern*np.random.rand(self.S)
+            self.rate_alpha[r] = alpha_pattern*np.exp(np.random.normal(0,0.01,self.S))
             self.rate_beta[r] = 1.e4*np.random.rand(self.S)
 
     @cython.boundscheck(False)
@@ -1203,7 +1215,7 @@ list states, list frames, np.ndarray[np.float64_t, ndim=2] beta, str start):
 def learn_parameters(observations, codon_id, scales, missings, stop, restarts, mintol):
 
     cdef long restart, i
-    cdef double scale, Lmax, L, dL, newL, starttime, totaltime
+    cdef double scale, Lmax, L, dL, newL, reltol, starttime, totaltime
     cdef str start
     cdef list data, Ls, states, frames, ig
     cdef dict id
@@ -1221,79 +1233,86 @@ def learn_parameters(observations, codon_id, scales, missings, stop, restarts, m
 
     for restart in xrange(restarts):
 
-        # Initialize variables        
+        # Initialize latent variables
         states = [State(datum.M) for datum in data]
         frames = [Frame() for datum in data]
 
-        # First,
-        # allow start transitions only at AUG and
-        # stop transitions at the first UAA, UAG, UGA
-        print "Estimating periodicity using canonical START/STOP codons ..."
-        start = "canonical"
-        transition = Transition(start, stop)
+        # First, allow start transitions only at AUG
+        print "Estimating periodicity using canonical START codon ..."
+        transition = Transition()
         transition.seqparam['start'][2:] = utils.MIN
-        emission = Emission(start,100.)
+        emission = Emission()
 
         starttime = time.time()
+        # compute initial log likelihood
         for datum,state in zip(data,states):
             datum.compute_log_likelihood(emission)
             state._forward_update(datum, transition)
         L = np.mean([(np.sum(frame.posterior*state.likelihood) \
                 + np.sum(frame.posterior*datum.extra_log_likelihood))/datum.L \
-                for state,frame in zip(states,frames)])
+                for datum,state,frame in zip(data,states,frames)])
         dL = np.inf
         print "%.2f sec to compute likelihood"%(time.time()-starttime)
 
-        # Estimate parameters
-        while (np.abs(dL)/np.abs(L))>mintol*1e2:
+        # iterate gradient descent till weak convergence
+        # occupancy parameters are not optimized in this initial stage
+        reltol = np.abs(dL)/np.abs(L)
+        while reltol>mintol*1e2:
 
             totaltime = time.time()
+
+            # update latent states
             starttime = time.time()
             for state,frame,datum in zip(states, frames, data):
                 state._reverse_update(datum, transition)
                 frame.update(datum, state)
             print "%.2f sec to update latent states"%(time.time()-starttime)
 
+            # update periodicity parameters
             starttime = time.time()
             emission.update_periodicity(data, states, frames)
             print "%.2f sec to update emission"%(time.time()-starttime)
 
+            # update transition parameters
             starttime = time.time()
             transition.update(data, states, frames)
             print "%.2f sec to update transition"%(time.time()-starttime)
 
+            # compute log likelihood
             starttime = time.time()
             for datum,state in zip(data,states):
                 datum.compute_log_likelihood(emission)
                 state._forward_update(datum, transition)
             newL = np.mean([(np.sum(frame.posterior*state.likelihood) \
                 + np.sum(frame.posterior*datum.extra_log_likelihood))/datum.L \
-                for state,frame in zip(states,frames)])
+                for datum,state,frame in zip(data,states,frames)])
             print "%.2f sec to compute likelihood"%(time.time()-starttime)
 
             dL = newL-L
             L = newL
-            print L, (dL/np.abs(L)), time.time()-totaltime
+            reltol = dL/np.abs(L)
+            print L, reltol, time.time()-totaltime
 
-        print "Keeping transition parameters fixed, update emission rate parameters ..."
-        starttime = time.time()
-        emission.start = "noncanonical"
+        # update emission occupancy parameters, keeping all other parameters fixed
+        print "Keeping transition parameters fixed, update emission occupancy parameters ..."
+        emission.restrict = False
+
+        # update occupancy precision
         starttime = time.time()
         emission.update_beta(data, states, frames, 1e-3)
         print "%.2f sec to update beta"%(time.time()-starttime)
+
+        # update occupancy mean
         starttime = time.time()
         emission.update_alpha(data, states, frames)
         print "%.2f sec to update alpha"%(time.time()-starttime)
 
         # Next, keeping emission parameters fixed,
-        # relax transition probabilities
+        # relax transitions to allow noncanonical codons
         print "Keeping emission parameters fixed, estimating transition probabilities ..."
+        transition.restrict = False
         starttime = time.time()
-        transition.start = "noncanonical"
         transition.seqparam['start'][2:] = -5+np.random.rand(transition.seqparam['start'][2:].size)
-        if stop=="readthrough":
-            transition.stop = stop
-            transition.seqparam['stop'][1:] = np.random.rand(3)*10
 
         # update likelihood with updated emission parameters
         # update posterior of latent states with initialization of transition parameters
@@ -1305,49 +1324,57 @@ def learn_parameters(observations, codon_id, scales, missings, stop, restarts, m
         transition.update(data, states, frames)
         print "%.2f sec to update transition"%(time.time()-starttime)
 
+        # compute log likelihood
         starttime = time.time()
         for datum,state in zip(data,states):
             datum.compute_log_likelihood(emission)
             state._forward_update(datum, transition)
         L = np.mean([(np.sum(frame.posterior*state.likelihood) \
                 + np.sum(frame.posterior*datum.extra_log_likelihood))/datum.L \
-                for state,frame in zip(states,frames)])
+                for datum,state,frame in zip(data,states,frames)])
         print "%.2f sec to compute likelihood"%(time.time()-starttime)
 
         # Finally, update all parameters
         print "Updating all parameters"
         dL = np.inf
-        while (np.abs(dL)/np.abs(L))>mintol:
+        reltol = np.abs(dL)/np.abs(L)
+        while reltol>mintol:
 
             totaltime = time.time()
+
+            # update latent variables
             starttime = time.time()
             for state,frame,datum in zip(states, frames, data):
                 state._reverse_update(datum, transition)
                 frame.update(datum, state)
             print "%.2f sec to update latent states"%(time.time()-starttime)
 
+            # update transition parameters
             starttime = time.time()
             transition.update(data, states, frames)
             print "%.2f sec to update transition"%(time.time()-starttime)
 
+            # update emission parameters
             starttime = time.time()
             emission.update_periodicity(data, states, frames)
             emission.update_beta(data, states, frames, 1e-3)
             emission.update_alpha(data, states, frames)
             print "%.2f sec to update emission"%(time.time()-starttime)
 
+            # compute log likelihood
             starttime = time.time()
             for datum,state in zip(data, states):
                 datum.compute_log_likelihood(emission)
                 state._forward_update(datum, transition)
             newL = np.mean([(np.sum(frame.posterior*state.likelihood) \
                 + np.sum(frame.posterior*datum.extra_log_likelihood))/datum.L \
-                for state,frame in zip(states,frames)])
+                for datum,state,frame in zip(data,states,frames)])
             print "%.2f sec to compute likelihood"%(time.time()-starttime)
 
             dL = newL-L
             L = newL
-            print L, (dL/np.abs(L)), time.time()-totaltime
+            reltol = dL/np.abs(L)
+            print L, reltol, time.time()-totaltime
 
         Ls.append(L)
         if L>Lmax:
@@ -1355,7 +1382,7 @@ def learn_parameters(observations, codon_id, scales, missings, stop, restarts, m
             best_transition = transition
             best_emission = emission
 
-    return best_transition, best_emission
+    return best_transition, best_emission, Ls
 
 def infer_coding_sequence(observations, codon_id, scales, missings, transition, emission):
 
