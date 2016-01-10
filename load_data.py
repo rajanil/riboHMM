@@ -186,94 +186,28 @@ class RnaSeq():
 
         self._track.close()
 
-class Gene():
-
-    def __init__(self, line, attr):
-        try:
-            self.name = attr['gene_name']
-        except KeyError:
-            # not a field in some gtf files
-            pass
-        self.chromosome = line[0]
-        self.transcripts = dict()
-        if line[6] in ['+','-']:
-            self.strand = line[6]
-        else:
-            self.strand = '+'
-        self.start = 0
-        self.stop = 0
-        try:
-            self.type = attr['gene_type']
-        except KeyError:
-            pass
-        try:
-            self.type = attr['gene_biotype']
-        except KeyError:
-            pass
-        self.gene_set = False
-
-    def add_gene_info(self, line):
-        self.start = int(line[3])-1-exten
-        self.stop = int(line[4])+exten
-        self.gene_set = True
-
-    def add_transcript(self, line, attr):
-        transcript_id = attr['transcript_id']
-        self.transcripts[transcript_id] = Transcript(line, attr)
-        self.transcripts[transcript_id].geneid = attr['gene_id']
-        try:
-            self.transcripts[transcript_id].genename = attr['gene_name']
-        except KeyError:
-            # some gtf files don't have this field
-            pass
-
-    def add_exon(self, line, attr):
-        transcript_id = attr['transcript_id']
-        self.transcripts[transcript_id].add_exon(line)
-        try:
-            self.transcripts[transcript_id].exonrpkms.append(attr['cov'])
-        except KeyError:
-            pass
-
-    def add_start_codon(self, line, attr):
-        transcript_id = attr['transcript_id']
-        self.transcripts[transcript_id].add_start_codon(line)
-
-    def add_stop_codon(self, line, attr):
-        transcript_id = attr['transcript_id']
-        self.transcripts[transcript_id].add_stop_codon(line)
-
-    def generate_gene_models(self):
-        ig = [self.transcripts[key].generate_transcript_model() for key in self.transcripts.keys()]
-        newstart = np.min([t.start for t in self.transcripts.values() if t.transcript_set])
-        newstop = np.max([t.stop for t in self.transcripts.values() if t.transcript_set])
-        if not self.gene_set:
-            self.start = newstart
-            self.stop = newstop
-            self.gene_set = True
-        if newstart<self.start or newstop>self.stop:
-            self.gene_set = False
-            utils.pdb.set_trace()
-
-    def __len__(self):
-
-        return self.stop-self.start
-
 class Transcript():
 
     def __init__(self, line, attr):
 
         self.id = attr['transcript_id']
         self.chromosome = line[0]
-        self.transcript_set = False
+        self.start = int(line[3])-1
+        self.stop = int(line[4])
+
+        # if not specified, transcript is on positive strand
         if line[6] in ['+','-']:
             self.strand = line[6]
         else:
             self.strand = '+'
-        self.start = None
-        self.stop = None
+
         self.cdstart = None
         self.cdstop = None
+        self.exons = []
+        self.has_CDS = False
+        self.proteinid = ''
+
+        # add attribute fields that are available
         try:
             self.type = attr['transcript_type']
         except KeyError:
@@ -282,38 +216,30 @@ class Transcript():
             self.type = attr['gene_biotype']
         except KeyError:
             pass
-        self.exons = []
-        self.exonrpkms = []
-        self.has_CDS = False
-        self.genename = ''
-        self.geneid = ''
-        self.proteinid = ''
-        self.ref_transcript_id = None
-        self.ref_gene_id = None
-        self.fpkm = 0
-        self.cov = 0
-
-    def add_transcript_info(self, line, attr):
-
-        self.start = int(line[3])-1-exten
-        self.stop = int(line[4])+exten
-        self.transcript_set = True
+        try:
+            self.transcripts[transcript_id].geneid = attr['gene_id']
+        except KeyError:
+            pass
+        try:
+            self.transcripts[transcript_id].genename = attr['gene_name']
+        except KeyError:
+            pass
+        try:
+            genes[geneid].transcripts[transcript_id].ref_transcript_id = attr['reference_id']
+        except KeyError:
+            pass
+        try:
+            genes[geneid].transcripts[transcript_id].ref_gene_id = attr['ref_gene_id']
+        except KeyError:
+            pass
+        try:
+            genes[geneid].transcripts[transcript_id].genename = attr['ref_gene_name']
+        except KeyError:
+            pass
 
     def add_exon(self, line):
         exon = (int(line[3])-1, int(line[4]))
         self.exons.append(exon)
-
-    def add_start_codon(self, line):
-        if line[6]=='+':
-            self.cdstart = int(line[3])-1
-        else:
-            self.cdstop = int(line[4])
-
-    def add_stop_codon(self, line):
-        if line[6]=='+':
-            self.cdstop = int(line[4])
-        else:
-            self.cdstart = int(line[3])-1
 
     def generate_transcript_model(self):
 
@@ -321,59 +247,27 @@ class Transcript():
 
             # order exons
             order = np.argsort(np.array([e[0] for e in self.exons]))
-            self.order = order
             self.exons = [[self.exons[o][0],self.exons[o][1]] for o in order]
 
-            start = self.exons[0][0]-exten
-            stop = self.exons[-1][-1]+exten
-            if not self.transcript_set:
-                self.start = start
-                self.stop = stop
-                self.transcript_set = True
-            if self.start>start or self.stop<stop:
-                self.transcript_set = False
-                utils.pdb.set_trace()
+            # extend transcript boundaries, if needed
+            transcript.start = min([transcript.start, self.exons[0][0]])
+            transcript.stop = max([transcript.stop, self.exons[-1][-1]])
 
-            self.exons = [(e[0]-self.start-exten, e[1]-self.start-exten) for e in self.exons]
-
+            # set transcript model
+            self.exons = [(e[0]-self.start, e[1]-self.start) for e in self.exons]
             self.mask = np.zeros((self.stop-self.start,),dtype='bool')
-            ig = [self.mask.__setslice__(start+exten,stop+exten,True) for (start,stop) in self.exons]
-            #self.mask[:exten] = True
-            #self.mask[-exten:] = True
+            ig = [self.mask.__setslice__(start,stop,True) for (start,stop) in self.exons]
             if self.strand=='-':
                 self.mask = self.mask[::-1]
-            mindex = np.where(self.mask)[0]
-            self.boundaries = np.where((mindex[:-1]-mindex[1:])<-1)[0]+1
 
-            if self.cdstart is not None and self.cdstop is not None:
-                self.has_CDS = True
-                if self.strand=='+':
-                    self.utr5 = self.mask[:self.cdstart-self.start].sum()
-                    self.utr3 = self.mask[:(self.cdstop-self.start)].sum()
-                else:
-                    self.utr5 = self.mask[:self.stop-self.cdstop].sum()
-                    self.utr3 = self.mask[:(self.stop-self.cdstart)].sum()
-            else:
-                self.utr5 = None
-                self.utr3 = None
-            self._utr5 = self.utr5
-            self._utr3 = self.utr3
+        else:
 
-    def modify_CDS(self, start, stop):
-
-        self._utr5 = self.utr5
-        self._utr3 = self.utr3
-        self.utr5 = start
-        self.utr3 = stop
-
-    def revert_CDS(self):
-
-        self.utr5 = self._utr5
-        self.utr3 = self._utr3
+            # no exons for transcript; remove
+            raise ValueError
 
     def __len__(self):
 
-        return self.utr3-self.utr5
+        return self.mask.sum()
 
 def load_gtf(filename):
 
@@ -396,43 +290,34 @@ def load_gtf(filename):
             chrom = 'chr%s'%data[0]
         data[0] = chrom
 
-        # is the transcript in the gene dictionary?
         transcript_id = attr['transcript_id']
         try:
+        
+            # if transcript is in dictionary, only parse exons
             transcripts[transcript_id]
             if data[2]=='exon':
-                transcripts[transcript_id].add_exon(data, attr)
+                transcripts[transcript_id].add_exon(data)
             else:
-                print "Unknown annotation"
-                utils.pdb.set_trace()
+                pass
+        
         except KeyError:
-            genes[geneid].add_transcript(data, attr)
-            if data[2]=='transcript':
-                genes[geneid].transcripts[transcript_id].add_transcript_info(data, attr)
-                try:
-                    genes[geneid].transcripts[transcript_id].ref_transcript_id = attr['reference_id']
-                except KeyError:
-                    pass
-                try:
-                    genes[geneid].transcripts[transcript_id].ref_gene_id = attr['ref_gene_id']
-                except KeyError:
-                    pass
-                try:
-                    genes[geneid].transcripts[transcript_id].genename = attr['ref_gene_name']
-                except KeyError:
-                    pass
 
-            else:
-                utils.pdb.set_trace()
+            if not data[2]=='transcript':
+                print "unknown annotation; poor ordering"
+                pdb.set_trace()
+
+            # initialize new transcript
+            transcripts[transcript_id] = Transcript(line, attr)
+                
     handle.close()
 
-    # generate transcript models;
-    # set gene and transcript attributes, if not set already.
-    for key,value in genes.iteritems():
-        genes[key].generate_gene_models()
-
-    genedict = dict([(gene,[val.transcripts[key] for key in np.sort(val.transcripts.keys()).tolist() \
-        if val.transcripts[key].transcript_set]) for gene,val in genes.iteritems()])
+    # generate transcript models
+    keys = transcripts.keys()
+    for key in keys:
+        try:
+            transcripts[key].generate_transcript_model()
+        except ValueError:
+            del transcripts[key]
 
     return transcripts
 

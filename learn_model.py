@@ -1,6 +1,5 @@
 import numpy as np
 import load_data
-import pysam
 import ribohmm
 import argparse
 import utils
