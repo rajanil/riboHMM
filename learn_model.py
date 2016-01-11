@@ -25,20 +25,20 @@ def parse_args():
                         default=1000,
                         help="number of transcripts used for learning model parameters.")
 
-    parser.add_argument("--model_output_file",
+    parser.add_argument("--model_file",
                         type=str,
                         default=None,
-                        help="file name to store the model parameters")
+                        help="output file name to store the model parameters")
 
     parser.add_argument("--log_file",
                         type=str,
                         default=None,
                         help="file name to store some statistics of the EM algorithm ")
 
-    parser.add_argument("--rnaseq_bam_file",
+    parser.add_argument("--rnaseq_file",
                         type=str,
                         default=None,
-                        help="bam file from RNA-seq assay")
+                        help="bigWig file with counts of RNA-seq reads")
 
     parser.add_argument("--mappability_file",
                         type=str,
@@ -49,13 +49,13 @@ def parse_args():
                         action="store",
                         help="fasta file containing the genome sequence")
 
-    parser.add_argument("gtf_input_file",
+    parser.add_argument("gtf_file",
                         action="store",  
                         help="gtf file containing the assembled transcript models")
 
-    parser.add_argument("riboseq_bam_file",
+    parser.add_argument("riboseq_file",
                         action="store",
-                        help="bam file from ribosome profiling assay.")
+                        help="bigWig file with counts of ribosome footprints.")
 
     options = parser.parse_args()
 
