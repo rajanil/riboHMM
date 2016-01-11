@@ -1,6 +1,7 @@
 import numpy as np
 import pysam
 import argparse
+import utils
 import os, pdb
 
 MIN_MAP_QUAL = 10
@@ -67,8 +68,8 @@ def convert_rnaseq(options):
     count_handle.close()
 
     # index count file
-    pysam.tabix_compress(count_file, count_file+'.gz', force=True)
-    bgz_file = pysam.tabix_index(count_file+'.gz', force=True, zerobased=True, seq_col=1, start_col=2, end_col=3)
+    bgz_file = pysam.tabix_index(count_file, force=True, \
+        zerobased=True, seq_col=1, start_col=2, end_col=3)
     print "Compressed file with RNA-seq counts is %s"%bgz_file
 
 
@@ -78,8 +79,8 @@ def convert_riboseq(options):
     fwd_count_file = os.path.splitext(options.bam_file)[0]+'_fwd'
     rev_count_file = os.path.splitext(options.bam_file)[0]+'_rev'
     sam_handle = pysam.Samfile(options.bam_file, "rb")
-    fwd_count_handle = open(fwd_count_file, 'w')
-    rev_count_handle = open(rev_count_file, 'w')
+    fwd_handle = dict([(r,open(fwd_count_file+'.%d'%r, 'w')) for r in utils.READ_LENGTHS])
+    rev_handle = dict([(r,open(rev_count_file+'.%d'%r, 'w')) for r in utils.READ_LENGTHS])
 
     for cname,clen in zip(sam_handle.references,sam_handle.lengths):
 
@@ -87,9 +88,13 @@ def convert_riboseq(options):
         sam_iter = sam_handle.fetch(reference=cname)
 
         # initialize count arrays
-        fwd_counts = dict()
-        rev_counts = dict()
+        fwd_counts = dict([(r,dict()) for r in utils.READ_LENGTHS])
+        rev_counts = dict([(r,dict()) for r in utils.READ_LENGTHS])
         for read in sam_iter:
+
+            # skip reads not of the appropriate length
+            if read.rlen not in utils.READ_LENGTHS:
+                continue
 
             # skip read if unmapped
             if read.is_unmapped:
@@ -102,38 +107,41 @@ def convert_riboseq(options):
             if read.is_reverse:
                 asite = int(read.positions[-11])
                 try:
-                    rev_counts[asite] += 1
+                    rev_counts[read.rlen][asite] += 1
                 except KeyError:
-                    rev_counts[asite] = 1
+                    rev_counts[read.rlen][asite] = 1
             else:
                 asite = int(read.positions[11])
                 try:
-                    fwd_counts[asite] += 1
+                    fwd_counts[read.rlen][asite] += 1
                 except KeyError:
-                    fwd_counts[asite] = 1
+                    fwd_counts[read.rlen][asite] = 1
 
         # write counts to output files
-        indices = np.sort(fwd_counts.keys())
-        for i in indices:
-            fwd_count_handle.write('\t'.join([cname, '%d'%i, '%d'%(i+1), '%d'%fwd_counts[i]])+'\n')
+        for r in utils.READ_LENGTHS:
+            indices = np.sort(fwd_counts[r].keys())
+            for i in indices:
+                fwd_handle[r].write('\t'.join([cname, '%d'%i, '%d'%(i+1), '%d'%fwd_counts[r][i]])+'\n')
 
-        indices = np.sort(rev_counts.keys())
-        for i in indices:
-            rev_count_handle.write('\t'.join([cname,'%d'%i,'%d'%(i+1),'%d'%rev_counts[i]])+'\n')
+            indices = np.sort(rev_counts[r].keys())
+            for i in indices:
+                rev_handle[r].write('\t'.join([cname, '%d'%i, '%d'%(i+1), '%d'%rev_counts[r][i]])+'\n')
 
         print "completed %s"%cname
 
     sam_handle.close()
-    fwd_count_handle.close()
-    rev_count_handle.close()
+    for r in utils.READ_LENGTHS:
+        fwd_handle[r].close()
+        rev_handle[r].close()
 
-    # index count file
-    pysam.tabix_compress(fwd_count_file, fwd_count_file+'.gz', force=True)
-    bgz_file = pysam.tabix_index(fwd_count_file+'.gz', force=True, zerobased=True, seq_col=1, start_col=2, end_col=3)
-    print "Compressed file with ribosome footprint counts on forward strand is %s"%bgz_file
-    pysam.tabix_compress(rev_count_file, rev_count_file+'.gz', force=True)
-    bgz_file = pysam.tabix_index(rev_count_file+'.gz', force=True, zerobased=True, seq_col=1, start_col=2, end_col=3)
-    print "Compressed file with ribosome footprint counts on reverse strand is %s"%bgz_file
+    for r in utils.READ_LENGTHS:
+        # index count file
+        bgz_file = pysam.tabix_index(fwd_count_file+'.%d'%r, \
+            force=True, zerobased=True, seq_col=1, start_col=2, end_col=3)
+        print "Compressed file with ribosome footprint counts on forward strand is %s"%bgz_file
+        bgz_file = pysam.tabix_index(rev_count_file+'.%d'%r, \
+            force=True, zerobased=True, seq_col=1, start_col=2, end_col=3)
+        print "Compressed file with ribosome footprint counts on reverse strand is %s"%bgz_file
 
 if __name__=="__main__":
 

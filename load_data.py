@@ -46,15 +46,15 @@ class RiboSeq():
 
     def __init__(self, file_prefix):
 
-        self.fwd_handles = [pysam.TabixFile(file_prefix+'_fwd.%d.bgzf'%r) for r in utils.READ_LENGTHS]
-        self.rev_handles = [pysam.TabixFile(file_prefix+'_rev.%d.bgzf'%r) for r in utils.READ_LENGTHS]
+        self.fwd_handles = [pysam.TabixFile(file_prefix+'_fwd.%d.gz'%r) for r in utils.READ_LENGTHS]
+        self.rev_handles = [pysam.TabixFile(file_prefix+'_rev.%d.gz'%r) for r in utils.READ_LENGTHS]
 
     def get_counts(self, transcripts):
 
         read_counts = []
         for transcript in transcripts:
 
-            counts = []
+            rcounts = [np.zeros(transcript.mask.shape, dtype='int') for r in utils.READ_LENGTHS]
             if transcript.strand=='+':
                 tbx_iters = [handle.fetch(transcript.chromosome, transcript.start, transcript.stop) \
                     for handle in self.fwd_handles]
@@ -62,32 +62,21 @@ class RiboSeq():
                 tbx_iters = [handle.fetch(transcript.chromosome, transcript.start, transcript.stop) \
                     for handle in self.rev_handles]
 
-            for tbx_iter in tbx_iters:
+            for tbx_iter,counts in zip(tbx_iters,rcounts):
+
                 for tbx in tbx_iter:
 
-                if transcript.strand=='+':
-                    # skip reverse strand reads
-                    if read.is_reverse:
-                        continue
-                    else:
-                        asite = read.positions[11]-transcript.start
-                else:
-                    # skip forward strand reads
-                    if not read.is_reverse:
-                        continue
-                    else:
-                        asite = transcript.stop-read.positions[-11]
+                    row = tbx.split('\t')
+                    count = int(row[3])
 
-                # check if A-site is within transcript 
-                if asite>=0:
-                    # only keep footprints of specific lengths
-                    try:
-                        counts[read.rlen][asite] += 1
-                    except KeyError:
-                        pass
+                    if transcript.strand=='+':
+                        asite = int(row[1]) - transcript.start
+                    else:
+                        asite = transcript.stop - int(row[1])
 
-            read_counts.append(np.array([counts[r][transcript.mask] \
-                for r in utils.READ_LENGHTS]).T.astype(np.uint64))
+                    counts[asite] = count
+
+            read_counts.append(np.array(rcounts).T.astype(np.uint64))
 
         return read_counts
 
@@ -99,38 +88,17 @@ class RiboSeq():
 
     def get_exon_total_counts(self, transcripts):
 
+        read_counts = self.get_counts(transcripts)
         exon_counts = []
-        for transcript in transcripts:
-
-            counts = np.zeros(transcript.mask.shape, dtype='int')
-            sam_iter = self._handle.fetch(reference=transcript.chromosome, start=transcript.start, end=transcript.stop)
-
-            for read in sam_iter:
-
-                if transcript.strand=='+':
-                    # skip reverse strand reads
-                    if read.is_reverse:
-                        continue
-                    else:
-                        asite = read.positions[11]-transcript.start
-                else:
-                    # skip forward strand reads
-                    if not read.is_reverse:
-                        continue
-                    else:
-                        asite = read.positions[-11]-transcript.start
-
-                # check if A-site is within transcript 
-                if asite>=0:
-                    counts[asite] += 1
-
-            exon_counts.append(np.array([counts[start:end].sum() for start,end in transcript.exons])
+        for transcript,counts in zip(transcripts,read_counts):
+            exon_counts.append(np.array([counts[start:end,:].sum() for start,end in transcript.exons])
 
         return exon_counts
 
     def close(self):
 
-        self.handle.close()
+        ig = [handle.close() for handle in self.fwd_handles]
+        ig = [handle.close() for handle in self.rev_handles]
 
 class RnaSeq():
 
@@ -144,14 +112,17 @@ class RnaSeq():
         for transcript in transcripts:
 
             counts = 0
-            sam_iter = self._handle.fetch(reference=transcript.chromosome, start=transcript.start, end=transcript.stop)
+            tbx_iter = self.handle.fetch(reference=transcript.chromosome, start=transcript.start, end=transcript.stop)
             if transcript.strand=='+':
                 mask = transcript.mask
             else:
                 mask = transcript.mask[::-1]
 
-            for read in sam_iter:
+            for tbx in tbx_iter:
 
+                row = tbx.split('\t')
+                site = int(row[1])
+                count = int(row[3])
                 if mask[site]:
                     count += 1
 
