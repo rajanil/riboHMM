@@ -1,5 +1,5 @@
 import numpy as np
-import pysam
+import ngslib
 import utils
 
 MIN_MAP_QUAL = 10

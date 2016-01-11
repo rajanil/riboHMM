@@ -45,9 +45,9 @@ def parse_args():
                         default=None,
                         help="file with mappability information")
 
-    parser.add_argument("genome_fasta",
+    parser.add_argument("genome_twobit",
                         action="store",
-                        help="fasta file containing the genome sequence")
+                        help="twobit file containing the genome sequence")
 
     parser.add_argument("gtf_file",
                         action="store",  
