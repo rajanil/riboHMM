@@ -11,9 +11,9 @@ def parse_args():
                                      " for ribosome profiling and RNA-seq data ")
 
     parser.add_argument("--dtype",
-                        choices=("RNAseq","Riboseq"),
-                        default="Riboseq",
-                        help="specifies the type of assay (default: Riboseq)")
+                        choices=("rnaseq","riboseq"),
+                        default="riboseq",
+                        help="specifies the type of assay (default: riboseq)")
 
     parser.add_argument("bam_file",
                         action=store,
@@ -26,9 +26,9 @@ def parse_args():
 def convert_rnaseq(options):
 
     # file names and handles
-    wigfile = os.path.splitext(options.bam_file)[0]+'.wig'
+    count_file = os.path.splitext(options.bam_file)[0]
     sam_handle = pysam.Alignmentfile(options.bam_file, "rb")
-    wig_handle = open(options.wig_file, 'w')
+    count_handle = open(count_file, 'w')
 
     for cname,clen in zip(sam_handle.references,sam_handle.lengths):
 
@@ -48,32 +48,36 @@ def convert_rnaseq(options):
                 continue
 
             if read.is_reverse:
-                site = read.pos + read.alen
+                site = read.pos + read.alen - 1
             else:
-                site = read.pos + 1
+                site = read.pos
 
             counts[site] += 1
 
-        # write counts to wig file
-        wig_handle.write('variableStep chrom=%s\n'%cname)
+        # write counts to output file
         indices = np.where(counts!=0)[0]
-        towrite = '\n'.join([' '.join(['%d'%i,'%d'%c]) for i,c in zip(indices,counts[indices])])
-        wig_handle.write(towrite)
+        towrite = '\n'.join(['\t'.join([cname,'%d'%i,'%d'%(i+1),'%d'%c]) for i,c in zip(indices,counts[indices])])
+        count_handle.write(towrite)
 
         print "completed %s"%cname
 
     sam_handle.close()
-    wig_handle.close()
+    count_handle.close()
+
+    # index count file
+    bgz_file = pysam.tabix_index(count_file, force=True, zerobased=True)
+
+    print "Compressed file with RNA-seq counts is %s"%bgz_file
 
 
 def convert_riboseq(options):
 
     # file names and handles
-    fwd_wig_file = os.path.splitext(options.bam_file)[0]+'_fwd.wig'
-    rev_wig_file = os.path.splitext(options.bam_file)[0]+'_rev.wig'
+    fwd_count_file = os.path.splitext(options.bam_file)[0]+'_fwd'
+    rev_count_file = os.path.splitext(options.bam_file)[0]+'_rev'
     sam_handle = pysam.Alignmentfile(options.bam_file, "rb")
-    fwd_wig_handle = open(fwd_wig_file, 'w')
-    rev_wig_handle = open(rev_wig_file, 'w')
+    fwd_count_handle = open(fwd_count_file, 'w')
+    rev_count_handle = open(rev_count_file, 'w')
 
     for cname,clen in zip(sam_handle.references,sam_handle.lengths):
 
@@ -92,7 +96,6 @@ def convert_riboseq(options):
             # skip read, if mapping quality is low
             if read.mapq < MIN_MAP_QUAL:
                 continue
-
             
             if read.is_reverse:
                 asite = read.positions[-11]
@@ -101,30 +104,32 @@ def convert_riboseq(options):
                 asite = read.positions[11]
                 fwd_counts[asite] += 1
 
-        # write counts to wig files
-        fwd_wig_handle.write('variableStep chrom=%s\n'%cname)
+        # write counts to output files
         indices = np.where(fwd_counts!=0)[0]
-        towrite = '\n'.join([' '.join(['%d'%i,'%d'%c]) for i,c in zip(indices,fwd_counts[indices])])
-        fwd_wig_handle.write(towrite)
+        towrite = '\n'.join(['\t'.join([cname,'%d'%i,'%d'%(i+1),'%d'%c]) for i,c in zip(indices,fwd_counts[indices])])
+        fwd_count_handle.write(towrite)
 
-        rev_wig_handle.write('variableStep chrom=%s\n'%cname)
         indices = np.where(rev_counts!=0)[0]
-        towrite = '\n'.join([' '.join(['%d'%i,'%d'%c]) for i,c in zip(indices,rev_counts[indices])])
-        rev_wig_handle.write(towrite)
+        towrite = '\n'.join([' '.join([cname,'%d'%i,'%d'%(i+1),'%d'%c]) for i,c in zip(indices,rev_counts[indices])])
+        rev_count_handle.write(towrite)
 
         print "completed %s"%cname
 
     sam_handle.close()
-    fwd_wig_handle.close()
-    rev_wig_handle.close()
+
+    # index count file
+    bgz_file = pysam.tabix_index(fwd_count_file, force=True, zerobased=True)
+    print "Compressed file with ribosome footprint counts on forward strand is %s"%bgz_file
+    bgz_file = pysam.tabix_index(rev_count_file, force=True, zerobased=True)
+    print "Compressed file with ribosome footprint counts on reverse strand is %s"%bgz_file
 
 if __name__=="__main__":
 
     options = parse_args()
 
-    if options.dtype=="RNAseq":
+    if options.dtype=="rnaseq":
         convert_rnaseq(options)
 
-    elif options.dtype=="Riboseq":
+    elif options.dtype=="riboseq":
         convert_riboseq(options)
 

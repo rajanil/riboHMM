@@ -45,17 +45,21 @@ def parse_args():
                         default=None,
                         help="file with mappability information")
 
-    parser.add_argument("genome_twobit",
+    parser.add_argument("twobit",
                         action="store",
                         help="twobit file containing the genome sequence")
 
-    parser.add_argument("gtf_file",
+    parser.add_argument("gtf",
                         action="store",  
                         help="gtf file containing the assembled transcript models")
 
-    parser.add_argument("riboseq_file",
+    parser.add_argument("fwd_bigwig",
                         action="store",
-                        help="bigWig file with counts of ribosome footprints.")
+                        help="bigWig file with counts of ribosome footprints on forward strand")
+
+    parser.add_argument("rev_bigwig",
+                        action="store",
+                        help="bigWig file with counts of ribosome footprints on reverse strand")
 
     options = parser.parse_args()
 
@@ -127,8 +131,8 @@ def learn(options):
 
     # load pre-computed Kozak model
     kozak_model = np.load("data/kozak_model.npz")
-    freq = dict([(char,row) for char,row in zip(['A','U','G','C'],kozak_model['freq'])])
-    altfreq = dict([(char,row) for char,row in zip(['A','U','G','C'],kozak_model['altfreq'])])
+    freq = dict([(char,row) for char,row in zip(['A','U','G','C'], kozak_model['freq'])])
+    altfreq = dict([(char,row) for char,row in zip(['A','U','G','C'], kozak_model['altfreq'])])
     kozak_data.close()
     for char in ['A','U','G','C']:
         freq[char][9:12] = altfreq[char][9:12]

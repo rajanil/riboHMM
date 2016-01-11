@@ -1,5 +1,5 @@
 import numpy as np
-import ngslib
+import pysam
 import utils
 
 MIN_MAP_QUAL = 10
@@ -44,27 +44,26 @@ class Genome():
 
 class RiboSeq():
 
-    def __init__(self, filename):
+    def __init__(self, file_prefix):
 
-        self.handle = pysam.Samfile(filename, "rb")
+        self.fwd_handles = [pysam.TabixFile(file_prefix+'_fwd.%d.bgzf'%r) for r in utils.READ_LENGTHS]
+        self.rev_handles = [pysam.TabixFile(file_prefix+'_rev.%d.bgzf'%r) for r in utils.READ_LENGTHS]
 
     def get_counts(self, transcripts):
 
         read_counts = []
         for transcript in transcripts:
 
-            counts = dict([(r,np.zeros(transcript.mask.shape, dtype='int')) for r in utils.READ_LENGTHS])
-            sam_iter = self._handle.fetch(reference=transcript.chromosome, start=transcript.start, end=transcript.stop)
+            counts = []
+            if transcript.strand=='+':
+                tbx_iters = [handle.fetch(transcript.chromosome, transcript.start, transcript.stop) \
+                    for handle in self.fwd_handles]
+            else:
+                tbx_iters = [handle.fetch(transcript.chromosome, transcript.start, transcript.stop) \
+                    for handle in self.rev_handles]
 
-            for read in sam_iter:
-
-                # skip read if unmapped
-                if read.is_unmapped:
-                    continue
-
-                # skip read, if mapping quality is low
-                if read.mapq < MIN_MAP_QUAL:
-                    continue
+            for tbx_iter in tbx_iters:
+                for tbx in tbx_iter:
 
                 if transcript.strand=='+':
                     # skip reverse strand reads
