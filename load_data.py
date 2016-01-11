@@ -107,14 +107,6 @@ class RiboSeq():
 
             for read in sam_iter:
 
-                # skip read if unmapped
-                if read.is_unmapped:
-                    continue
-
-                # skip read, if mapping quality is low
-                if read.mapq < MIN_MAP_QUAL:
-                    continue
-
                 if transcript.strand=='+':
                     # skip reverse strand reads
                     if read.is_reverse:
@@ -144,7 +136,7 @@ class RnaSeq():
 
     def __init__(self, filename):
 
-        self.handle = pysam.Samfile(filename, "rb")
+        self.handle = pysam.TabixFile(filename)
 
     def get_total_counts(self, transcripts):
 
@@ -160,19 +152,6 @@ class RnaSeq():
 
             for read in sam_iter:
 
-                # skip read if unmapped
-                if read.is_unmapped:
-                    continue
-
-                # skip read, if mapping quality is low
-                if read.mapq < MIN_MAP_QUAL:
-                    continue
-
-                if read.is_reverse:
-                    site = read.pos - transcript.start
-                else:
-                    site = read.pos + read.alen - 1 - transcript.start
-                
                 if mask[site]:
                     count += 1
 
