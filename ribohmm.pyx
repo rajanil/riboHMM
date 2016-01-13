@@ -45,7 +45,7 @@ cdef class Data:
 
     def __cinit__(self, np.ndarray[np.uint64_t, ndim=2] obs, \
     dict codon_id, double scale, \
-    np.ndarray[np.uint8_t, ndim=2, cast=True] missing):
+    np.ndarray[np.uint8_t, ndim=2, cast=True] mappable):
 
         cdef double r,m,f
 
@@ -54,14 +54,14 @@ cdef class Data:
         self.R = obs.shape[1]
         self.obs = obs
         self.scale = scale
-        self.missing = missing
+        self.mappable = mappable
         self.codon_id = codon_id
         self.indices = [[[np.empty((1,), dtype=np.uint64) \
             for s in xrange(9)] for r in xrange(4)] for f in xrange(3)]
         self.total = np.empty((3,self.M,self.R), dtype=np.uint64)
         for f from 0 <= f < 3:
             for r from 0 <= r < self.R:
-                self.total[f,:,r] = np.array([self.obs[3*m+f:3*m+3+f,r][self.missing[3*m+f:3*m+3+f,r]].sum() \
+                self.total[f,:,r] = np.array([self.obs[3*m+f:3*m+3+f,r][self.mappable[3*m+f:3*m+3+f,r]].sum() \
                     for m from 0 <= m < self.M])
 
     @cython.boundscheck(False)
@@ -83,25 +83,30 @@ cdef class Data:
                 log_likelihood = np.zeros((self.M,emission.S), dtype=np.float64)
 
                 # periodicity likelihood, accounting for mappability
-                log_likelihood = np.array([0 if np.all(self.missing[3*m+f:3*m+3+f,r]) else \
-                    gammaln(np.sum(self.obs[3*m+f:3*m+3+f,r][self.missing[3*m+f:3*m+3+f,r]])+1) \
-                    - np.sum(gammaln(self.obs[3*m+f:3*m+3+f,r][self.missing[3*m+f:3*m+3+f,r]]+1)) \
-                    if np.any(self.missing[3*m+f:3*m+3+f,r]) else \
-                    gammaln(self.total[f,m,r]+1) - np.sum(gammaln(self.obs[3*m+f:3*m+3+f,r]+1)) \
-                    for m in xrange(self.M)])
-                log_likelihood += np.array([0 if np.all(self.missing[3*m+f:3*m+3+f,r]) else \
-                    self.obs[3*m+f:3*m+3+f,r][self.missing[3*m+f:3*m+3+f,r]] \
-                    * (emission.logperiodicity[r,self.missing[3*m+f:3*m+3+f,r],:] \
-                    - np.log(utils.insum(emission.periodicity[r,self.missing[3*m+f:3*m+3+f,r],:],[1]))) \
-                    if np.any(self.missing[3*m+f:3*m+3+f,r]) else \
-                    np.sum(self.obs[3*m+f:3*m+3+f,r]*emission.logperiodicity[r],1) \
-                    for m in xrange(self.M)])
+                log_likelihood = np.array([gammaln(self.total[f,m,r]+1) 
+                    - np.sum(gammaln(self.obs[3*m+f:3*m+3+f,r]+1)) 
+                    if np.all(self.mappable[3*m+f:3*m+3+f,r]) else
+                    gammaln(np.sum(self.obs[3*m+f:3*m+3+f,r][self.mappable[3*m+f:3*m+3+f,r]])+1)
+                    - np.sum(gammaln(self.obs[3*m+f:3*m+3+f,r][self.mappable[3*m+f:3*m+3+f,r]]+1))
+                    if np.count_nonzero(self.mappable[3*m+f:3*m+3+f,r])==2 else
+                    0 for m in xrange(self.M)])
+                log_likelihood += np.array([np.sum(self.obs[3*m+f:3*m+3+f,r] 
+                    * emission.logperiodicity[r],1)
+                    if np.all(self.mappable[3*m+f:3*m+3+f,r]) else
+                    self.obs[3*m+f:3*m+3+f,r][self.mappable[3*m+f:3*m+3+f,r]]
+                    * (emission.logperiodicity[r,self.mappable[3*m+f:3*m+3+f,r],:]
+                    - np.log(utils.insum(emission.periodicity[r,self.mappable[3*m+f:3*m+3+f,r],:],[1])))
+                    if np.count_nonzero(self.mappable[3*m+f:3*m+3+f,r])==2 else
+                    0 for m in xrange(self.M)])
 
                 if not emission.restrict:
 
                     # occupancy likelihood, accounting for mappability
-                    scale = self.scale * np.array([np.zeros(emission.S) if np.all(self.missing[3*m+f:3*m+3+f,r]) \
-                        else emission.periodicity[r,self.missing[3*m+f:3*m+3+f,r],:].sum(0) for m in xrange(self.M)])
+                    scale = self.scale * np.array([np.ones(emission.S) 
+                        if np.all(self.mappable[3*m+f:3*m+3+f,r]) else
+                        emission.periodicity[r,self.mappable[3*m+f:3*m+3+f,r],:].sum(0)
+                        if np.any(self.mappable[3*m+f:3*m+3+f,r]) else
+                        np.zeros(emission.S) for m in xrange(self.M)])
                     missing = np.where(scale==0)[0].astype(np.int64)
                     scale[missing] = 1e-8
                     rate_log_likelihood = emission.rate_alpha[r]*emission.rate_beta[r]*utils.nplog(emission.rate_beta[r]) \
@@ -114,19 +119,24 @@ cdef class Data:
 
                     # likelihood of extra positions
                     for l from 0 <= l < f:
-                        if not self.missing[l,r]:
-                            self.extra_log_likelihood[f] += emission.rate_alpha[r,0]*emission.rate_beta[r,0]*utils.nplog(emission.rate_beta[r,0]) \
-                                - (emission.rate_alpha[r,0]*emission.rate_beta[r,0]+self.obs[l,r])*utils.nplog(emission.rate_beta[r,0]+self.scale/3.) \
-                                + gammaln(emission.rate_alpha[r,0]*emission.rate_beta[r,0]+self.obs[l,r]) \
-                                - gammaln(emission.rate_alpha[r,0]*emission.rate_beta[r,0]) \
-                                + self.obs[l,r]*utils.nplog(self.scale/3.) - gammaln(self.obs[l,r]+1)
+                        if self.mappable[l,r]:
+                            self.extra_log_likelihood[f] += emission.rate_alpha[r,0] * emission.rate_beta[r,0] \
+                                * utils.nplog(emission.rate_beta[r,0]) - (emission.rate_alpha[r,0] \
+                                * emission.rate_beta[r,0] + self.obs[l,r]) \
+                                * utils.nplog(emission.rate_beta[r,0] + self.scale/3.) \
+                                + gammaln(emission.rate_alpha[r,0] * emission.rate_beta[r,0] + self.obs[l,r]) \
+                                - gammaln(emission.rate_alpha[r,0] * emission.rate_beta[r,0]) \
+                                + self.obs[l,r] * utils.nplog(self.scale/3.) - gammaln(self.obs[l,r]+1)
                     for l from 3*self.M+f <= l < self.L:
-                        if not self.missing[l,r]:
-                            self.extra_log_likelihood[f] += emission.rate_alpha[r,emission.S-1]*emission.rate_beta[r,emission.S-1]*utils.nplog(emission.rate_beta[r,emission.S-1]) \
-                                    - (emission.rate_alpha[r,emission.S-1]*emission.rate_beta[r,emission.S-1]+self.obs[l,r])*utils.nplog(emission.rate_beta[r,emission.S-1]+self.scale/3.) \
-                                    + gammaln(emission.rate_alpha[r,emission.S-1]*emission.rate_beta[r,emission.S-1]+self.obs[l,r]) \
-                                    - gammaln(emission.rate_alpha[r,emission.S-1]*emission.rate_beta[r,emission.S-1]) \
-                                    + self.obs[l,r]*utils.nplog(self.scale/3.) - gammaln(self.obs[l,r]+1)
+                        if self.mappable[l,r]:
+                            self.extra_log_likelihood[f] += emission.rate_alpha[r,emission.S-1] \
+                                * emission.rate_beta[r,emission.S-1] * utils.nplog(emission.rate_beta[r,emission.S-1]) \
+                                - (emission.rate_alpha[r,emission.S-1] * emission.rate_beta[r,emission.S-1] \
+                                + self.obs[l,r]) * utils.nplog(emission.rate_beta[r,emission.S-1] \
+                                + self.scale/3.) + gammaln(emission.rate_alpha[r,emission.S-1] \
+                                * emission.rate_beta[r,emission.S-1] + self.obs[l,r]) \
+                                - gammaln(emission.rate_alpha[r,emission.S-1] * emission.rate_beta[r,emission.S-1]) \
+                                + self.obs[l,r] * utils.nplog(self.scale/3.) - gammaln(self.obs[l,r]+1)
 
                 self.log_likelihood[f] += log_likelihood
    
@@ -276,8 +286,6 @@ cdef class State:
         swapidx = np.array([1,2,3,5,6,7]).astype(np.uint8)
         self.pos_first_moment = np.empty((3,self.M,self.S), dtype=np.float64)
         self.pos_cross_moment_start = np.empty((3,self.M,2), dtype=np.float64)
-        if transition.stop=='readthrough':
-            self.pos_cross_moment_stop = np.zeros((3,4,2), dtype=np.float64)
 
         if transition.start=='canonical':
             P = logistic(-1*transition.seqparam['start'][data.codon_id['start']])
@@ -318,13 +326,6 @@ cdef class State:
                 self.pos_cross_moment_start[f,m+1,0] = exp(a+p)
                 self.pos_cross_moment_start[f,m+1,1] = exp(a+pp)
     
-                # pos cross moment at stop
-                if transition.stop=='readthrough':
-                    if data.codon_id['stop'][m+1,f]!=0:
-                        a = self.alpha[f,m,4] - self.likelihood[m+1,f]
-                        self.pos_cross_moment_stop[f,data.codon_id['stop'][m+1,f],0] += exp(a+q)
-                        self.pos_cross_moment_stop[f,data.codon_id['stop'][m+1,f],1] += exp(a+qq)
-
                 # other states
                 for s in swapidx:
                     newbeta[s] = beta[s+1]
@@ -358,12 +359,6 @@ cdef class State:
         or np.isinf(self.pos_cross_moment_start).any():
             print "Warning: Inf/Nan in start cross moment"
             pdb.set_trace()
-
-        if transition.stop=='readthrough':
-            if np.isnan(self.pos_cross_moment_stop).any() \
-            or np.isinf(self.pos_cross_moment_stop).any():
-                print "Warning: Inf/Nan in stop cross moment"
-                pdb.set_trace()
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -1216,22 +1211,22 @@ list states, list frames, np.ndarray[np.float64_t, ndim=2] beta):
 
     return func, Df, Hf
 
-def learn_parameters(observations, codon_id, scales, missings, stop, restarts, mintol):
+def learn_parameters(observations, codon_id, scales, mappability, restarts, mintol):
 
     cdef long restart, i
     cdef double scale, Lmax, L, dL, newL, reltol, starttime, totaltime
     cdef str start
     cdef list data, Ls, states, frames, ig
     cdef dict id
-    cdef np.ndarray observation, missing
+    cdef np.ndarray observation, mappable
     cdef Data datum
     cdef Emission emission, best_emission
     cdef Transition transition, best_transition
     cdef State state
     cdef Frame frame
 
-    data = [Data(observation, id, scale, missing) \
-        for observation, id, scale, missing in zip(observations, codon_id, scales, missings)]
+    data = [Data(observation, id, scale, mappable) \
+        for observation, id, scale, mappable in zip(observations, codon_id, scales, mappability)]
     Ls = []
     Lmax = -np.inf
 
@@ -1388,7 +1383,7 @@ def learn_parameters(observations, codon_id, scales, missings, stop, restarts, m
 
     return best_transition, best_emission, Ls
 
-def infer_coding_sequence(observations, codon_id, scales, missings, transition, emission):
+def infer_coding_sequence(observations, codon_id, scales, mappability, transition, emission):
 
     cdef Data datum
     cdef State state
@@ -1396,9 +1391,9 @@ def infer_coding_sequence(observations, codon_id, scales, missings, transition, 
     cdef dict id
     cdef double scale
     cdef list data, states, frames
-    cdef np.ndarray observation, missing
+    cdef np.ndarray observation, mappable 
 
-    data = [Data(observation, id, scale, missing) for observation,id,scale,missing in zip(observations,codon_id,scales,missings)]
+    data = [Data(observation, id, scale, mappable) for observation,id,scale,mappable in zip(observations,codon_id,scales,mappability)]
     states = [State(datum.M) for datum in data]
     frames = [Frame() for datum in data]
 

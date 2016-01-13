@@ -6,7 +6,7 @@ cdef class Data:
 
     cdef public long L, R, M
     cdef public double scale
-    cdef public np.ndarray obs, total, missing
+    cdef public np.ndarray obs, total, mappable
     cdef public np.ndarray log_likelihood, extra_log_likelihood
     cdef public dict codon_id
     cdef public indices
@@ -59,16 +59,6 @@ cdef class Emission:
     cdef update_beta(self, list data, list states, list frames, double reltol)
 
 cdef double normalize(np.ndarray[np.float64_t, ndim=1] x)
-
-cdef extern from "gsl/gsl_sf_gamma.h":
-
-    double  gsl_sf_lngamma(double x) nogil
-
-cdef extern from "gsl/gsl_sf_psi.h":
-
-    double  gsl_sf_psi(double x) nogil
-
-    double  gsl_sf_psi_1(double x) nogil
 
 cdef tuple transition_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, bool restrict)
 
