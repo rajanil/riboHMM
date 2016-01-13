@@ -71,7 +71,6 @@ cdef class Data:
 
         cdef long r, f, m, l
         cdef np.ndarray[np.float64_t, ndim=2] log_likelihood, rate_log_likelihood
-        cdef np.ndarray[np.uint64_t, ndim=2] count_data
         cdef np.ndarray[np.int64_t, ndim=1] missing
 
         self.log_likelihood = np.zeros((3, self.M, emission.S), dtype=np.float64)
@@ -84,7 +83,12 @@ cdef class Data:
                 log_likelihood = np.zeros((self.M,emission.S), dtype=np.float64)
 
                 # periodicity likelihood, accounting for mappability
-                log_likelihood = gammaln(self.total[f,:,r:r+1]+1) - utils.insum(gammaln(count_data+1),[1])
+                log_likelihood = np.array([0 if np.all(self.missing[3*m+f:3*m+3+f,r]) else \
+                    gammaln(np.sum(self.obs[3*m+f:3*m+3+f,r][self.missing[3*m+f:3*m+3+f,r]])+1) \
+                    - np.sum(gammaln(self.obs[3*m+f:3*m+3+f,r][self.missing[3*m+f:3*m+3+f,r]]+1)) \
+                    if np.any(self.missing[3*m+f:3*m+3+f,r]) else \
+                    gammaln(self.total[f,m,r]+1) - np.sum(gammaln(self.obs[3*m+f:3*m+3+f,r]+1)) \
+                    for m in xrange(self.M)])
                 log_likelihood += np.array([0 if np.all(self.missing[3*m+f:3*m+3+f,r]) else \
                     self.obs[3*m+f:3*m+3+f,r][self.missing[3*m+f:3*m+3+f,r]] \
                     * (emission.logperiodicity[r,self.missing[3*m+f:3*m+3+f,r],:] \
@@ -978,7 +982,7 @@ cdef class Emission:
         while not optimized:
 
             try:
-                x_final, optimized = optimize_alpha(x_init, data, states, frames, self.rate_beta, self.start)
+                x_final, optimized = optimize_alpha(x_init, data, states, frames, self.rate_beta)
                 if not optimized:
                     x_init = x_init*(1+0.1*(np.random.rand(V,1)-0.5))
 
@@ -990,7 +994,7 @@ cdef class Emission:
         self.rate_alpha = x_final.reshape(4,self.S)
 
     def __reduce__(self):
-        return (rebuild_Emission, (self.logperiodicity, self.rate_alpha, self.rate_beta, self.start))
+        return (rebuild_Emission, (self.logperiodicity, self.rate_alpha, self.rate_beta))
 
 def rebuild_Emission(per, alpha, beta, start):
     e = Emission(start, 1)
@@ -999,7 +1003,7 @@ def rebuild_Emission(per, alpha, beta, start):
     e.rate_beta = beta
     return e
 
-def optimize_alpha(x_init, data, states, frames, beta, start):
+def optimize_alpha(x_init, data, states, frames, beta):
 
     def F(x=None, z=None):
 
@@ -1010,7 +1014,7 @@ def optimize_alpha(x_init, data, states, frames, beta, start):
 
         if z is None:
             # compute likelihood function and gradient
-            results = alpha_func_grad(xx, data, states, frames, beta, start)
+            results = alpha_func_grad(xx, data, states, frames, beta)
 
             # check for infs or nans
             fd = results[0]
@@ -1029,7 +1033,7 @@ def optimize_alpha(x_init, data, states, frames, beta, start):
 
         else:
             # compute function, gradient, and hessian
-            results = alpha_func_grad_hess(xx, data, states, frames, beta, start)
+            results = alpha_func_grad_hess(xx, data, states, frames, beta)
 
             # check for infs or nans
             fd = results[0]
@@ -1077,7 +1081,7 @@ def optimize_alpha(x_init, data, states, frames, beta, start):
 @cython.wraparound(False)
 @cython.nonecheck(False)
 cdef tuple alpha_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, \
-list states, list frames, np.ndarray[np.float64_t, ndim=2] beta, str start):
+list states, list frames, np.ndarray[np.float64_t, ndim=2] beta):
 
     cdef Data datum
     cdef State state
@@ -1143,7 +1147,7 @@ list states, list frames, np.ndarray[np.float64_t, ndim=2] beta, str start):
 @cython.wraparound(False)
 @cython.nonecheck(False)
 cdef tuple alpha_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, \
-list states, list frames, np.ndarray[np.float64_t, ndim=2] beta, str start):
+list states, list frames, np.ndarray[np.float64_t, ndim=2] beta):
 
     cdef Data datum
     cdef State state

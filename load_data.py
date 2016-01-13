@@ -1,6 +1,7 @@
 import numpy as np
 import pysam
 import utils
+import pdb
 
 MIN_MAP_QUAL = 10
 
@@ -8,7 +9,7 @@ class Genome():
 
     def __init__(self, fasta_filename, map_filename):
 
-        self._seq_handle = pysam.FastaFile(fasta_filename)
+        self._seq_handle = pysam.Fastafile(fasta_filename)
 
     def get_sequence(self, transcripts):
 
@@ -16,16 +17,16 @@ class Genome():
         for transcript in transcripts:
 
             # get DNA sequence
-            seq = self._seq_handle.fetch(transcript.chromsome, transcript.start, transcript.stop)
+            seq = self._seq_handle.fetch(transcript.chromosome, transcript.start, transcript.stop).upper()
 
             # get DNA sequence of transcript
             # reverse complement, if necessary
             if transcript.strand=="-":
                 seq = seq[::-1]
-                seq = seq[transcript.mask]
+                seq = ''.join(np.array(list(seq))[transcript.mask].tolist())
                 seq = utils.make_complement(seq)
             else:
-                seq = seq[transcript.mask]
+                seq = ''.join(np.array(list(seq))[transcript.mask].tolist())
 
             # get RNA sequence
             seq = ''.join(['U' if s=='T' else s for s in seq])
@@ -46,8 +47,8 @@ class RiboSeq():
 
     def __init__(self, file_prefix):
 
-        self.fwd_handles = [pysam.TabixFile(file_prefix+'_fwd.%d.gz'%r) for r in utils.READ_LENGTHS]
-        self.rev_handles = [pysam.TabixFile(file_prefix+'_rev.%d.gz'%r) for r in utils.READ_LENGTHS]
+        self._fwd_handles = [pysam.Tabixfile(file_prefix+'_fwd.%d.gz'%r) for r in utils.READ_LENGTHS]
+        self._rev_handles = [pysam.Tabixfile(file_prefix+'_rev.%d.gz'%r) for r in utils.READ_LENGTHS]
 
     def get_counts(self, transcripts):
 
@@ -57,10 +58,10 @@ class RiboSeq():
             rcounts = [np.zeros(transcript.mask.shape, dtype='int') for r in utils.READ_LENGTHS]
             if transcript.strand=='+':
                 tbx_iters = [handle.fetch(transcript.chromosome, transcript.start, transcript.stop) \
-                    for handle in self.fwd_handles]
+                    for handle in self._fwd_handles]
             else:
                 tbx_iters = [handle.fetch(transcript.chromosome, transcript.start, transcript.stop) \
-                    for handle in self.rev_handles]
+                    for handle in self._rev_handles]
 
             for tbx_iter,counts in zip(tbx_iters,rcounts):
 
@@ -68,15 +69,15 @@ class RiboSeq():
 
                     row = tbx.split('\t')
                     count = int(row[3])
-
-                    if transcript.strand=='+':
-                        asite = int(row[1]) - transcript.start
-                    else:
-                        asite = transcript.stop - int(row[1])
-
+                    asite = int(row[1]) - transcript.start
                     counts[asite] = count
 
-            read_counts.append(np.array(rcounts).T.astype(np.uint64))
+            if transcript.strand=='+':
+                rcounts = np.array(rcounts).T.astype(np.uint64)
+            else:
+                rcounts = np.array(rcounts).T.astype(np.uint64)[::-1]
+
+            read_counts.append(rcounts)
 
         return read_counts
 
@@ -91,49 +92,50 @@ class RiboSeq():
         read_counts = self.get_counts(transcripts)
         exon_counts = []
         for transcript,counts in zip(transcripts,read_counts):
-            exon_counts.append(np.array([counts[start:end,:].sum() for start,end in transcript.exons])
+            exon_counts.append(np.array([counts[start:end,:].sum() for start,end in transcript.exons]))
 
         return exon_counts
 
     def close(self):
 
-        ig = [handle.close() for handle in self.fwd_handles]
-        ig = [handle.close() for handle in self.rev_handles]
+        ig = [handle.close() for handle in self._fwd_handles]
+        ig = [handle.close() for handle in self._rev_handles]
 
 class RnaSeq():
 
     def __init__(self, filename):
 
-        self.handle = pysam.TabixFile(filename)
+        self._handle = pysam.Tabixfile(filename+'.gz')
+        self.total = reduce(lambda x,y: x+y, (int(tbx.split('\t')[3]) for tbx in self._handle.fetch()))
 
     def get_total_counts(self, transcripts):
 
         total_counts = []
         for transcript in transcripts:
 
-            counts = 0
-            tbx_iter = self.handle.fetch(reference=transcript.chromosome, start=transcript.start, end=transcript.stop)
+            tbx_iter = self._handle.fetch(transcript.chromosome, transcript.start, transcript.stop)
             if transcript.strand=='+':
                 mask = transcript.mask
             else:
                 mask = transcript.mask[::-1]
 
+            counts = 0
             for tbx in tbx_iter:
 
                 row = tbx.split('\t')
-                site = int(row[1])
+                site = int(row[1])-transcript.start
                 count = int(row[3])
                 if mask[site]:
-                    count += 1
+                    counts += 1
 
-            total_counts.append(max([1,count])*1e6/transcript.L/self.total)
+            total_counts.append(max([1,counts])*1e6/float(transcript.L*self.total))
 
         total_counts = np.array(total_counts)
         return total_counts
 
     def close(self):
 
-        self._track.close()
+        self._handle.close()
 
 class Transcript():
 
@@ -166,23 +168,23 @@ class Transcript():
         except KeyError:
             pass
         try:
-            self.transcripts[transcript_id].geneid = attr['gene_id']
+            self.geneid = attr['gene_id']
         except KeyError:
             pass
         try:
-            self.transcripts[transcript_id].genename = attr['gene_name']
+            self.genename = attr['gene_name']
         except KeyError:
             pass
         try:
-            genes[geneid].transcripts[transcript_id].ref_transcript_id = attr['reference_id']
+            self.ref_transcript_id = attr['reference_id']
         except KeyError:
             pass
         try:
-            genes[geneid].transcripts[transcript_id].ref_gene_id = attr['ref_gene_id']
+            self.ref_gene_id = attr['ref_gene_id']
         except KeyError:
             pass
         try:
-            genes[geneid].transcripts[transcript_id].genename = attr['ref_gene_name']
+            self.genename = attr['ref_gene_name']
         except KeyError:
             pass
 
@@ -199,8 +201,8 @@ class Transcript():
             self.exons = [[self.exons[o][0],self.exons[o][1]] for o in order]
 
             # extend transcript boundaries, if needed
-            transcript.start = min([transcript.start, self.exons[0][0]])
-            transcript.stop = max([transcript.stop, self.exons[-1][-1]])
+            self.start = min([self.start, self.exons[0][0]])
+            self.stop = max([self.stop, self.exons[-1][-1]])
 
             # set transcript model
             self.exons = [(e[0]-self.start, e[1]-self.start) for e in self.exons]
@@ -209,14 +211,12 @@ class Transcript():
             if self.strand=='-':
                 self.mask = self.mask[::-1]
 
+            self.L = self.mask.sum()
+
         else:
 
             # no exons for transcript; remove
             raise ValueError
-
-    def __len__(self):
-
-        return self.mask.sum()
 
 def load_gtf(filename):
 
@@ -256,7 +256,7 @@ def load_gtf(filename):
                 pdb.set_trace()
 
             # initialize new transcript
-            transcripts[transcript_id] = Transcript(line, attr)
+            transcripts[transcript_id] = Transcript(data, attr)
                 
     handle.close()
 
