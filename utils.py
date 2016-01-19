@@ -9,6 +9,19 @@ STOPCODONS = ['UAA','UAG','UGA']
 STOPS = dict([(s,i+1) for i,s in enumerate(STOPCODONS)])
 STOPRE = [re.compile(s) for s in STOPCODONS]
 
+def debinarize(mask):
+
+    return np.sum(2**np.where(mask[::-1])[0])
+
+binarize = dict([(0,np.array([False,False,False])),
+                 (1,np.array([False,False,True])),
+                 (2,np.array([False,True,False])),
+                 (3,np.array([False,True,True])),
+                 (4,np.array([True,False,False])),
+                 (5,np.array([True,False,True])),
+                 (6,np.array([True,True,False])),
+                 (7,np.array([True,True,True]))
+                ])
 
 def mark_start_codons(sequence):
 

@@ -6,10 +6,9 @@ cdef class Data:
 
     cdef public long L, R, M
     cdef public double scale
-    cdef public np.ndarray obs, total, mappable
+    cdef public np.ndarray obs, total, mappable, rescale_indices
     cdef public np.ndarray log_likelihood, extra_log_likelihood
     cdef public dict codon_id
-    cdef public indices
 
     cdef compute_log_likelihood(self, Emission emission)
 
@@ -34,7 +33,7 @@ cdef class State:
 
     cdef decode(self, Data data, Transition transition, Emission emission, Frame frame)
 
-    cdef public double joint_likelihood(self, Data data, Transition transition, np.ndarray[np.uint8_t, ndim=1] state, long frame)
+    cdef public double joint_probability(self, Data data, Transition transition, np.ndarray[np.uint8_t, ndim=1] state, long frame)
 
     cdef public double compute_posterior(self, Data data, Transition transition, long start, long stop)
 
@@ -52,11 +51,7 @@ cdef class Emission:
 
     cdef public long S, R
     cdef public bool restrict
-    cdef public np.ndarray periodicity, logperiodicity, rate_alpha, rate_beta
-
-    cdef update_periodicity(self, list data, list states, list frames)
-
-    cdef update_beta(self, list data, list states, list frames, double reltol)
+    cdef public np.ndarray periodicity, logperiodicity, rate_alpha, rate_beta, rescale
 
 cdef double normalize(np.ndarray[np.float64_t, ndim=1] x)
 
@@ -64,6 +59,10 @@ cdef tuple transition_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, l
 
 cdef tuple transition_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, bool restrict)
 
-cdef tuple alpha_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=2] beta)
+cdef tuple beta_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, list constants)
 
-cdef tuple alpha_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=2] beta)
+cdef tuple beta_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, list constants)
+
+cdef tuple alpha_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, list constants)
+
+cdef tuple alpha_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, list constants)

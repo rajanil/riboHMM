@@ -225,7 +225,7 @@ def load_gtf(filename):
 
     for line in handle:
         # remove comments
-        if '#'==line[0]:
+        if line.startswith('#'):
             continue
 
         # read data
@@ -233,7 +233,7 @@ def load_gtf(filename):
         attr = dict([(ln.split()[0],eval(ln.split()[1])) for ln in data[8].split(';')[:-1]])
 
         # identify chromosome of the transcript
-        if data[0][0]=='c':
+        if data[0].startswith('c'):
             chrom = data[0]
         else:
             chrom = 'chr%s'%data[0]

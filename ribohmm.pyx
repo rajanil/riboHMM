@@ -43,9 +43,7 @@ cdef np.ndarray[np.float64_t, ndim=1] outsum(np.ndarray[np.float64_t, ndim=2] ar
 
 cdef class Data:
 
-    def __cinit__(self, np.ndarray[np.uint64_t, ndim=2] obs, \
-    dict codon_id, double scale, \
-    np.ndarray[np.uint8_t, ndim=2, cast=True] mappable):
+    def __cinit__(self, np.ndarray[np.uint64_t, ndim=2] obs, dict codon_id, double scale, np.ndarray[np.uint8_t, ndim=2, cast=True] mappable):
 
         cdef double r,m,f
 
@@ -56,13 +54,14 @@ cdef class Data:
         self.scale = scale
         self.mappable = mappable
         self.codon_id = codon_id
-        self.indices = [[[np.empty((1,), dtype=np.uint64) \
-            for s in xrange(9)] for r in xrange(4)] for f in xrange(3)]
+        self.rescale_indices = np.zeros((self.R,3,self.M), dtype=np.uint8)
         self.total = np.empty((3,self.M,self.R), dtype=np.uint64)
         for f from 0 <= f < 3:
             for r from 0 <= r < self.R:
-                self.total[f,:,r] = np.array([self.obs[3*m+f:3*m+3+f,r][self.mappable[3*m+f:3*m+3+f,r]].sum() \
-                    for m from 0 <= m < self.M])
+                self.rescale_indices[r,f] = np.array([utils.debinarize(self.mappable[3*m+f:3*m+3+f,r]) 
+                                            for m in xrange(self.M)]).astype(np.uint8)
+                self.total[f,:,r] = np.array([self.obs[3*m+f:3*m+3+f,r][self.mappable[3*m+f:3*m+3+f,r]].sum()
+                                    for m in xrange(self.M)])
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -70,8 +69,8 @@ cdef class Data:
     cdef compute_log_likelihood(self, Emission emission):
 
         cdef long r, f, m, l
+        cdef np.ndarray rescale, mask
         cdef np.ndarray[np.float64_t, ndim=2] log_likelihood, rate_log_likelihood
-        cdef np.ndarray[np.int64_t, ndim=1] missing
 
         self.log_likelihood = np.zeros((3, self.M, emission.S), dtype=np.float64)
         self.extra_log_likelihood = np.zeros((3,), dtype=np.float64)
@@ -86,7 +85,7 @@ cdef class Data:
                 log_likelihood = np.array([gammaln(self.total[f,m,r]+1) 
                     - np.sum(gammaln(self.obs[3*m+f:3*m+3+f,r]+1)) 
                     if np.all(self.mappable[3*m+f:3*m+3+f,r]) else
-                    gammaln(np.sum(self.obs[3*m+f:3*m+3+f,r][self.mappable[3*m+f:3*m+3+f,r]])+1)
+                    gammaln(self.total[f,m,r]+1)
                     - np.sum(gammaln(self.obs[3*m+f:3*m+3+f,r][self.mappable[3*m+f:3*m+3+f,r]]+1))
                     if np.count_nonzero(self.mappable[3*m+f:3*m+3+f,r])==2 else
                     0 for m in xrange(self.M)])
@@ -102,19 +101,21 @@ cdef class Data:
                 if not emission.restrict:
 
                     # occupancy likelihood, accounting for mappability
-                    scale = self.scale * np.array([np.ones(emission.S) 
-                        if np.all(self.mappable[3*m+f:3*m+3+f,r]) else
-                        emission.periodicity[r,self.mappable[3*m+f:3*m+3+f,r],:].sum(0)
-                        if np.any(self.mappable[3*m+f:3*m+3+f,r]) else
-                        np.zeros(emission.S) for m in xrange(self.M)])
-                    missing = np.where(scale==0)[0].astype(np.int64)
-                    scale[missing] = 1e-8
-                    rate_log_likelihood = emission.rate_alpha[r]*emission.rate_beta[r]*utils.nplog(emission.rate_beta[r]) \
-                        - (emission.rate_alpha[r]*emission.rate_beta[r]+self.total[f,:,r:r+1])*utils.nplog(emission.rate_beta[r]+scale) \
-                        + gammaln(emission.rate_alpha[r]*emission.rate_beta[r]+self.total[f,:,r:r+1]) \
-                        - gammaln(emission.rate_alpha[r]*emission.rate_beta[r]) \
-                        + self.total[f,:,r:r+1]*utils.nplog(scale) - gammaln(self.total[f,:,r:r+1]+1)
-                    rate_log_likelihood[missing] = 0
+                    mask = datum.rescale_indices[r,f,:]==0
+                    rescale = emission.rescale[r,s,datum.rescale_indices[r,f,:]]
+                    rate_log_likelihood = emission.rate_alpha[r] * emission.rate_beta[r] \
+                        * utils.nplog(emission.rate_beta[r]) + gammaln(emission.rate_alpha[r] \
+                        * emission.rate_beta[r] + self.total[f,:,r:r+1]) \
+                        - gammaln(emission.rate_alpha[r] * emission.rate_beta[r]) \
+                        - gammaln(self.total[f,:,r:r+1]+1)
+                    for s in xrange(emission.S):
+                        rescale = emission.rescale[r,s,datum.rescale_indices[r,f,:]]
+                        rate_log_likelihood[:,s] = rate_log_likelihood[:,s] - (emission.rate_alpha[r,s] * 
+                                                   emission.rate_beta[r,s] + self.total[f,:,r:r+1]) * 
+                                                   utils.nplog(emission.rate_beta[r,s] + self.scale*rescale)
+                        rate_log_likelihood[mask,s] = rate_log_likelihood[mask,s] + self.total[f,mask,r:r+1] * 
+                                                      utils.nplog(rescale[mask]*self.scale)
+                    rate_log_likelihood[mask] = 0
                     log_likelihood += rate_log_likelihood
 
                     # likelihood of extra positions
@@ -180,8 +181,11 @@ cdef class State:
     
     def __cinit__(self, long M):
 
+        # number of triplets
         self.M = M
+        # number of states for the HMM
         self.S = 9
+        # stores the (start,stop) and posterior for the MAP state for each frame
         self.best_start = []
         self.best_stop = []
         self.max_posterior = np.empty((3,), dtype=np.float64)
@@ -203,10 +207,11 @@ cdef class State:
         self.likelihood = np.empty((self.M,3), dtype=np.float64)
         newalpha = np.empty((self.S,), dtype=np.float64)
 
-        if transition.start=='canonical':
+        if transition.restrict:
             P = logistic(-1*transition.seqparam['start'][data.codon_id['start']])
         else:
-            P = logistic(-1*(transition.seqparam['kozak']*data.codon_id['kozak']+transition.seqparam['start'][data.codon_id['start']]))
+            P = logistic(-1*(transition.seqparam['kozak'] * data.codon_id['kozak'] \
+                + transition.seqparam['start'][data.codon_id['start']]))
         Q = logistic(-1*transition.seqparam['stop'][data.codon_id['stop']])
 
         for f from 0 <= f < 3:
@@ -219,7 +224,7 @@ cdef class State:
 
             for m from 1 <= m < self.M:
       
-                # other states
+                # states 2,3,6,7
                 for s in swapidx:
                     newalpha[s] = self.alpha[f,m-1,s-1] + data.log_likelihood[f,m,s]
 
@@ -287,10 +292,11 @@ cdef class State:
         self.pos_first_moment = np.empty((3,self.M,self.S), dtype=np.float64)
         self.pos_cross_moment_start = np.empty((3,self.M,2), dtype=np.float64)
 
-        if transition.start=='canonical':
+        if transition.restrict:
             P = logistic(-1*transition.seqparam['start'][data.codon_id['start']])
         else:
-            P = logistic(-1*(transition.seqparam['kozak']*data.codon_id['kozak']+transition.seqparam['start'][data.codon_id['start']]))
+            P = logistic(-1*(transition.seqparam['kozak'] * data.codon_id['kozak'] \
+                + transition.seqparam['start'][data.codon_id['start']]))
         Q = logistic(-1*transition.seqparam['stop'][data.codon_id['stop']])
 
         for f from 0 <= f < 3:
@@ -326,7 +332,7 @@ cdef class State:
                 self.pos_cross_moment_start[f,m+1,0] = exp(a+p)
                 self.pos_cross_moment_start[f,m+1,1] = exp(a+pp)
     
-                # other states
+                # states 1,2,3,5,6,7
                 for s in swapidx:
                     newbeta[s] = beta[s+1]
                 newbeta[self.S-1] = beta[self.S-1]
@@ -372,7 +378,8 @@ cdef class State:
         cdef np.ndarray[np.float64_t, ndim=1] alpha, logprior
         cdef np.ndarray[np.float64_t, ndim=2] P, Q
 
-        P = logistic(-1*(transition.seqparam['kozak']*data.codon_id['kozak']+transition.seqparam['start'][data.codon_id['start']]))
+        P = logistic(-1*(transition.seqparam['kozak'] * data.codon_id['kozak'] \
+            + transition.seqparam['start'][data.codon_id['start']]))
         Q = logistic(-1*transition.seqparam['stop'][data.codon_id['stop']])
 
         logprior = utils.nplog([1,0,0,0,0,0,0,0,0])
@@ -390,7 +397,7 @@ cdef class State:
 
             for m from 1 <= m < self.M:
 
-                # other states
+                # states 2,3,6,7
                 for s in swapidx:
                     newalpha[s] = alpha[s-1]
                     pointer[m,s] = s-1
@@ -444,19 +451,24 @@ cdef class State:
                 for s from 0 <= s < self.S:
                     alpha[s] = newalpha[s] + data.log_likelihood[f,m,s]
 
+            # constructing the MAP state sequence
             state[self.M-1] = np.argmax(alpha)
             for m in xrange(self.M-2,0,-1):
                 state[m] = pointer[m+1,state[m+1]]
             state[0] = pointer[0,0]
+            self.max_posterior[f] = exp(np.max(alpha) - np.sum(self.likelihood[:,f]))
+
+            # identifying start codon position
             try:
                 self.best_start.append(np.where(state==2)[0][0]*3+f)
             except IndexError:
                 self.best_start.append(None)
+
+            # identifying stop codon position
             try:
                 self.best_stop.append(np.where(state==7)[0][0]*3+f)
             except IndexError:
                 self.best_stop.append(None)
-            self.max_posterior[f] = exp(np.max(alpha) - np.sum(self.likelihood[:,f]))
 
         self.alpha = np.empty((1,1,1), dtype=np.float64)
         self.pos_cross_moment_start = np.empty((1,1,1), dtype=np.float64)
@@ -467,41 +479,42 @@ cdef class State:
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.nonecheck(False)
-    cdef double joint_likelihood(self, Data data, Transition transition, np.ndarray[np.uint8_t, ndim=1] state, long frame):
+    cdef double joint_probability(self, Data data, Transition transition, 
+                                  np.ndarray[np.uint8_t, ndim=1] state, long frame):
 
         cdef long m
-        cdef double p, q, joint_likelihood
+        cdef double p, q, joint_probability
 
-        joint_likelihood = data.log_likelihood[frame,0,state[0]]
+        joint_probability = data.log_likelihood[frame,0,state[0]]
 
         for m from 1 <= m < self.M:
 
             if state[m-1]==0:
     
-                p = transition.seqparam['kozak']*data.codon_id['kozak'][m,frame] \
+                p = transition.seqparam['kozak'] * data.codon_id['kozak'][m,frame] \
                     + transition.seqparam['start'][data.codon_id['start'][m,frame]]
                 try:
-                    joint_likelihood = joint_likelihood - log(1+exp(-p))
+                    joint_probability = joint_probability - log(1+exp(-p))
                     if state[m]==0:
-                        joint_likelihood = joint_likelihood - p
+                        joint_probability = joint_probability - p
                 except OverflowError:
                     if state[m]==1:
-                        joint_likelihood = joint_likelihood - p
+                        joint_probability = joint_probability - p
 
             elif state[m-1]==4:
 
                 q = transition.seqparam['stop'][data.codon_id['stop'][m,frame]]
                 try:
-                    joint_likelihood = joint_likelihood - log(1+exp(-q))
+                    joint_probability = joint_probability - log(1+exp(-q))
                     if state[m]==4:
-                        joint_likelihood = joint_likelihood - q
+                        joint_probability = joint_probability - q
                 except OverflowError:
                     if state[m]==5:
-                        joint_likelihood = joint_likelihood - q
+                        joint_probability = joint_probability - q
 
-            joint_likelihood = joint_likelihood + data.log_likelihood[frame,m,state[m]]
+            joint_probability = joint_probability + data.log_likelihood[frame,m,state[m]]
 
-        return joint_likelihood
+        return joint_probability
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -509,7 +522,7 @@ cdef class State:
     cdef double compute_posterior(self, Data data, Transition transition, long start, long stop):
 
         cdef long frame
-        cdef double joint_like, like, posterior
+        cdef double joint_prob, marginal_prob, posterior
         cdef np.ndarray state
 
         frame = start%3
@@ -528,9 +541,11 @@ cdef class State:
         state[stop] = 7
         state[stop+1:] = 8
 
-        joint_like = self.joint_likelihood(data, transition, state, frame)
-        like = np.sum(self.likelihood[:,frame])
-        posterior = exp(joint_like - like)
+        # compute joint probability
+        joint_prob = self.joint_probability(data, transition, state, frame)
+        # compute marginal probability
+        marginal_prob = np.sum(self.likelihood[:,frame])
+        posterior = exp(joint_prob - marginal_prob)
 
         return posterior
 
@@ -551,19 +566,19 @@ cdef class Transition:
         '5UTS','5UTS+','TIS','TIS+','TES','TTS-','TTS','3UTS-','3UTS'
         """
 
+        # number of states in HMM
         self.S = 9
         self.restrict = True
         self.C = len(set(utils.STARTS.values()))+1
 
         self.seqparam = dict()
-
-        # initialize translation initiation parameters
+        # initialize parameters for translation initiation
         self.seqparam['kozak'] = 0
         self.seqparam['start'] = -1*np.random.rand(self.C)
         self.seqparam['start'][0] = utils.MIN
         self.seqparam['start'][1] = 1+np.random.rand()
 
-        # initialize translation termination parameters
+        # initialize parameters for translation termination
         self.seqparam['stop'] = utils.MAX*np.ones((4,), dtype=np.float64)
         self.seqparam['stop'][0] = utils.MIN
 
@@ -689,8 +704,7 @@ def optimize_transition_initiation(x_init, data, states, frames, restrict):
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.nonecheck(False)
-cdef tuple transition_func_grad(np.ndarray[np.float64_t, ndim=1] x, \
-list data, list states, list frames, bool restrict):
+cdef tuple transition_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, bool restrict):
 
     cdef Data datum
     cdef State state
@@ -720,17 +734,17 @@ list data, list states, list frames, bool restrict):
                 arg = x[0]*datum.codon_id['kozak'][1:,j] + xex[datum.codon_id['start'][1:,j]]
 
             # evaluate function
-            func += frame.posterior[j] * np.sum(state.pos_cross_moment_start[j,1:,0]*arg \
-                - state.pos_cross_moment_start[j].sum(1)[1:]*utils.nplog(1+np.exp(arg)))
+            func += frame.posterior[j] * np.sum(state.pos_cross_moment_start[j,1:,0] * arg \
+                - state.pos_cross_moment_start[j].sum(1)[1:] * utils.nplog(1+np.exp(arg)))
 
             # evaluate gradient
             vec = state.pos_cross_moment_start[j,1:,0] \
-                - state.pos_cross_moment_start[j].sum(1)[1:]*logistic(-arg)
+                - state.pos_cross_moment_start[j].sum(1)[1:] * logistic(-arg)
             if restrict:
                 tmp = datum.codon_id['start'][1:,j]==1
                 df[0] += frame.posterior[j] * np.sum(vec[tmp])
             else:
-                df[0] += frame.posterior[j]*np.sum(vec*datum.codon_id['kozak'][1:,j])
+                df[0] += frame.posterior[j] * np.sum(vec*datum.codon_id['kozak'][1:,j])
                 for v from 1 <= v < V:
                     tmp = datum.codon_id['start'][1:,j]==v
                     df[v] += frame.posterior[j] * np.sum(vec[tmp])
@@ -740,8 +754,7 @@ list data, list states, list frames, bool restrict):
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.nonecheck(False)
-cdef tuple transition_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, \
-list data, list states, list frames, bool restrict):
+cdef tuple transition_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, bool restrict):
 
     cdef Data datum
     cdef State state
@@ -773,13 +786,13 @@ list data, list states, list frames, bool restrict):
                 arg = x[0]*datum.codon_id['kozak'][1:,j] + xex[datum.codon_id['start'][1:,j]]
 
             # evaluate function
-            func += frame.posterior[j] * np.sum(state.pos_cross_moment_start[j,1:,0]*arg \
-                - state.pos_cross_moment_start[j].sum(1)[1:]*utils.nplog(1+np.exp(arg)))
+            func += frame.posterior[j] * np.sum(state.pos_cross_moment_start[j,1:,0] * arg \
+                - state.pos_cross_moment_start[j].sum(1)[1:] * utils.nplog(1+np.exp(arg)))
 
             # evaluate gradient and hessian
             vec = state.pos_cross_moment_start[j,1:,0] \
-                - state.pos_cross_moment_start[j].sum(1)[1:]*logistic(-arg)
-            vec2 = state.pos_cross_moment_start[j].sum(1)[1:]*logistic(arg)*logistic(-arg)
+                - state.pos_cross_moment_start[j].sum(1)[1:] * logistic(-arg)
+            vec2 = state.pos_cross_moment_start[j].sum(1)[1:] * logistic(arg) * logistic(-arg)
             if restrict:
                 tmp = datum.codon_id['start'][1:,j]==1
                 df[0] += frame.posterior[j] * np.sum(vec[tmp])
@@ -791,7 +804,7 @@ list data, list states, list frames, bool restrict):
                     tmp = datum.codon_id['start'][1:,j]==v
                     df[v] += frame.posterior[j] * np.sum(vec[tmp])
                     Hf[v,v] += frame.posterior[j] * np.sum(vec2[tmp])
-                    Hf[0,v] += frame.posterior[j] * np.sum(vec2[tmp]*datum.codon_id['kozak'][1:,j][tmp])
+                    Hf[0,v] += frame.posterior[j] * np.sum(vec2[tmp] * datum.codon_id['kozak'][1:,j][tmp])
 
     if not restrict:
         Hf[:,0] = Hf[0,:]
@@ -810,6 +823,7 @@ cdef class Emission:
         self.R = len(utils.READ_LENGTHS)
         self.periodicity = np.empty((self.R,3,self.S), dtype=np.float64)
         self.logperiodicity = np.empty((self.R,3,self.S), dtype=np.float64)
+        self.rescale = np.empty((self.R,self.S,8), dtype=np.float64)
         self.rate_alpha = np.empty((self.R,self.S), dtype=np.float64)
         self.rate_beta = np.empty((self.R,self.S), dtype=np.float64)
         alpha_pattern = np.array([1.,1.5,4.,6.,3.,6.,4.,1.,0.05])*100
@@ -824,131 +838,126 @@ cdef class Emission:
             self.rate_alpha[r] = alpha_pattern*np.exp(np.random.normal(0,0.01,self.S))
             self.rate_beta[r] = 1.e4*np.random.rand(self.S)
 
+        self.compute_rescaling()
+
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.nonecheck(False)
-    cdef update_periodicity(self, list data, list states, list frames):
+    def update_periodicity(self, data, states, frames):
 
-        cdef long r, j, index, f, m
-        cdef np.ndarray[np.float64_t, ndim=2] periodicity, count_data
-        cdef np.ndarray[np.float64_t, ndim=1] period
-        cdef np.ndarray[np.int64_t, ndim=1] notmissing
+        cdef bool optimized
+        cdef long r, s, t, f, m, T
+        cdef double ab
+        cdef list constants
+        cdef np.ndarray At, Bt, Ct, Et, result
         cdef Data datum
         cdef State state
         cdef Frame frame
 
+        T = len(data)
+        Et = np.array([d.scale for d in data]).reshape(T,1)
+
         for r from 0 <= r < self.R:
 
-            periodicity = np.zeros((3,self.S), dtype=np.float64)
-            for f from 0 <= f < 3:
+            for s from 1 <= s < self.S-1:
+            
+                # compute constants
+                At = np.zeros((3,), dtype=np.float64)
+                Bt = np.zeros((T,3), dtype=np.float64)
+                Ct = np.zeros((T,3), dtype=np.float64)
+                ab = self.alpha[r,s]*self.beta[r,s]
+                for t,(datum,state,frame) in enumerate(zip(data,states,frames)):
+                    
+                    for f in xrange(3):
+                        
+                        At[0] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*datum.obs[3*m+f,r] 
+                              for m in xrange(datum.M) if datum.mappable[3*m+f] and 
+                              (datum.mappable[3*m+f+1] or datum.mappable[3*m+f+2])])
+                        At[1] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*datum.obs[3*m+f+1,r] 
+                              for m in xrange(datum.M) if datum.mappable[3*m+f+1] and 
+                              (datum.mappable[3*m+f] or datum.mappable[3*m+f+2])])
+                        At[2] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*datum.obs[3*m+f+2,r] 
+                              for m in xrange(datum.M) if datum.mappable[3*m+f+2] and 
+                              (datum.mappable[3*m+f] or datum.mappable[3*m+f+1])])
+                        Bt[t,0] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*(datum.total[f,m,r]+ab) 
+                                   for m in xrange(self.M) if not datum.mappable[3*m+f] 
+                                   and datum.mappable[3*m+f+1] and datum.mappable[3*m+f+2]])
+                        Bt[t,1] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*(datum.total[f,m,r]+ab) 
+                                   for m in xrange(self.M) if datum.mappable[3*m+f] 
+                                   and not datum.mappable[3*m+f+1] and datum.mappable[3*m+f+2]])
+                        Bt[t,2] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*(datum.total[f,m,r]+ab) 
+                                   for m in xrange(self.M) if datum.mappable[3*m+f] 
+                                   and datum.mappable[3*m+f+1] and not datum.mappable[3*m+f+2]])
+                        Ct[t,0] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*(datum.total[f,m,r]+ab) 
+                                   for m in xrange(self.M) if datum.mappable[3*m+f] 
+                                   and not datum.mappable[3*m+f+1] and not datum.mappable[3*m+f+2]])
+                        Ct[t,1] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*(datum.total[f,m,r]+ab) 
+                                   for m in xrange(self.M) if not datum.mappable[3*m+f] 
+                                   and datum.mappable[3*m+f+1] and not datum.mappable[3*m+f+2]])
+                        Ct[t,2] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*(datum.total[f,m,r]+ab) 
+                                   for m in xrange(self.M) if not datum.mappable[3*m+f] 
+                                   and not datum.mappable[3*m+f+1] and datum.mappable[3*m+f+2]])
 
-                for datum,state,frame in zip(data,states,frames):
+                constants = [At, Bt, Ct, Et, self.beta[r,s]]
 
-                    count_data = np.array([datum.obs[3*m+f:3*m+3+f,r] for m in xrange(datum.M) \
-                        if not np.any(datum.missing[3*m+f:3*m+3+f,r])]).astype(np.float64)
-                    notmissing = np.array([m for m in xrange(datum.M) \
-                        if not np.any(datum.missing[3*m+f:3*m+3+f,r])])
-                    periodicity += frame.posterior[f] \
-                        * np.dot(count_data.T, state.pos_first_moment[f,notmissing,:])
+                # run optimizer
+                result, optimized = optimize_periodicity(self.periodicity[r,:,s], constants)
+                if optimized:
+                    self.periodicity[r,:,s] = result
 
-            # shared parameters for CDS state across frames, and TSS+ state in frame 0
-            period = periodicity[:,3] + periodicity[:,4]
-            periodicity[:,3] = period
-            periodicity[:,4] = period
-            periodicity[:,0] = 1
-            periodicity[:,self.S-1] = 1
-
-            periodicity[periodicity==0] = 1e-10
-            periodicity = periodicity/periodicity.sum(0)
-            self.logperiodicity[r,:,:] = utils.nplog(periodicity)
+        self.logperiodicity = utils.nplog(self.periodicity)
 
         if np.isinf(self.logperiodicity).any() or np.isnan(self.logperiodicity).any():
             print "Warning: Inf/Nan in periodicity parameter"
 
+        self.compute_rescaling()
+
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.nonecheck(False)
-    cdef update_beta(self, list data, list states, list frames, double reltol):
+    def compute_rescaling(self):
 
-        cdef long m, r, f, l, iter, maxiters
-        cdef double a, relerr
-        cdef np.ndarray[np.int64_t, ndim=1] nmissing
-        cdef np.ndarray[np.float64_t, ndim=1] tmpa, tmpb
-        cdef np.ndarray[np.float64_t, ndim=2] bb, den, mden, eden, numbb, newbb, tmpc
-        cdef Data datum
-        cdef State state
-        cdef Frame frame
-        cdef list notmissing, nmiss, main_den, extra_den
+        cdef long r, s, j
+        cdef np.ndarray mask
 
-        maxiters = 1000
-        bb = self.rate_beta
-        den = np.zeros((4,self.S), dtype=float)
-        notmissing = []
-        main_den = []
-        extra_den = []
+        for r in xrange(self.R):
 
-        for datum,state,frame in zip(data,states,frames):
-            nmiss = []
-            mden = np.zeros((4,self.S), dtype=float)
-            eden = np.zeros((4,self.S), dtype=float)
-            for r from 0 <= r < 4:
-                nmiss.append([])
-                for f from 0 <= f < 3:
-                    nmissing = np.array([m for m in xrange(datum.M) \
-                        if not np.any(datum.missing[3*m+f:3*m+3+f,r])])
-                    mden[r] += frame.posterior[f]*np.sum(state.pos_first_moment[f,nmissing,:],0)
-                    for l from 0 <= l < f:
-                        if not datum.missing[l,r]:
-                            eden[r,0] = eden[r,0] + frame.posterior[f]
-                    for l from 3*datum.M+f <= l < datum.L:
-                        if not datum.missing[l,r]:
-                            eden[r,8] = eden[r,8] + frame.posterior[f]
-                    nmiss[r].append(nmissing)
-            main_den.append(mden)
-            extra_den.append(eden)
-            den = den + mden + eden
-            notmissing.append(nmiss)
+            for s in xrange(self.S):
 
-        relerr = np.inf
-        for iter from 0 <= iter < maxiters:
+                for j,mask in utils.binarize.iteritems():
+                
+                    self.rescale[r,s,j] = np.sum(self.periodicity[r,mask,s])
 
-            numbb = np.zeros((4,self.S), dtype=float)
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.nonecheck(False)
+    def update_beta(self, data, states, frames):
 
-            for datum,state,frame,mden,eden,nmiss in zip(data,states,frames,main_den,extra_den,notmissing):
+        cdef bool optimized
+        cdef long r, s
+        cdef list constants
+        cdef np.ndarray x_init, x_final
 
-                numbb += np.log(bb+datum.scale)*mden + np.log(bb+datum.scale/3.)*eden
-                for r from 0 <= r < 4:
+        for r in xrange(data[0].R):
 
-                    tmpa = np.zeros((self.S,), dtype='float')
-                    tmpb = np.zeros((self.S,), dtype='float')
-                    for f from 0 <= f < 3:
+            for s in xrange(states[0].S):
 
-                        tmpc = self.rate_alpha[r]*bb[r] + datum.total[f,nmiss[r][f],r:r+1]
-                        tmpa = tmpa + frame.posterior[f] * np.sum(state.pos_first_moment[f,nmiss[r][f],:] * tmpc,0) \
-                            / (self.rate_alpha[r]*(bb[r]+datum.scale))
-                        tmpb = tmpb + frame.posterior[f] * np.sum(state.pos_first_moment[f,nmiss[r][f],:] * digamma(tmpc),0)
-                        
-                        for l from 0 <= l < f:
-                            if not datum.missing[l,r]:
-                                tmpa[0] = tmpa[0] + frame.posterior[f] * (self.rate_alpha[r,0]*bb[r,0]+datum.obs[l,r]) \
-                                    / (self.rate_alpha[r,0]*(bb[r,0]+datum.scale/3.))
-                                tmpb[0] = tmpb[0] + frame.posterior[f] * digamma(self.rate_alpha[r,0]*bb[r,0]+datum.obs[l,r])
-                        for l from 3*datum.M+f <= l < datum.L:
-                            if not datum.missing[l,r]:
-                                tmpa[8] = tmpa[8] + frame.posterior[f] * (self.rate_alpha[r,8]*bb[r,8]+datum.obs[l,r]) \
-                                    / (self.rate_alpha[r,8]*(bb[r,8]+datum.scale/3.))
-                                tmpb[8] = tmpb[8] + frame.posterior[f] * digamma(self.rate_alpha[r,8]*bb[r,8]+datum.obs[l,r])
+                # warm start for the optimization
+                optimized = False
+                x_init = np.array([[self.rate_beta[r,s]]])
+                constants = [r, s, self.rate_alpha[r,s]]
 
-                    numbb[r] += tmpa - tmpb
+                while not optimized:
 
-            newbb = np.exp(numbb/den + digamma(self.rate_alpha*bb) - 1)
+                    try:
+                        x_final, optimized = optimize_beta(x_init, data, states, frames, self.rescale, constants)
+                        if optimized:
+                            self.rate_beta[r,s] = x_final[0,0]
 
-            relerr = np.mean(np.abs((newbb-bb)/bb))
-            bb = newbb
-            if relerr<reltol:
-                break
-
-        self.rate_beta = bb
+                    except ValueError:
+                        # if any parameter becomes Inf or Nan during optimization,
+                        # or if hessian is negative definite, re-optimize with a cold start
+                        x_init = x_init*(1+0.1*(np.random.rand(1,1)-0.5))
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -956,49 +965,109 @@ cdef class Emission:
     def update_alpha(self, data, states, frames):
 
         cdef bool optimized
-        cdef long V
-        cdef np.ndarray xo, x_init, x_final, notmissing
+        cdef long r, s
+        cdef list constants
+        cdef np.ndarray x_init, x_final
 
-        # partition indices
-        for datum,state in zip(data,states):
-            for f in xrange(3):
-                for r in xrange(4):
-                    notmissing = np.array([1 if not np.any(datum.missing[3*m+f:3*m+3+f,r]) \
-                        else 0 for m in xrange(datum.M)])
-                    for s in xrange(self.S):
-                        datum.indices[f][r][s] = np.where(np.logical_and(notmissing==1,state.pos_first_moment[f,:,s]>0))[0]
+        for r in xrange(data[0].R):
 
-        # warm start for the optimization
-        optimized = False
-        xo = np.hstack(self.rate_alpha)
-        V = xo.size
-        x_init = xo.reshape(V,1)
+            for s in xrange(states[0].S):
 
-        while not optimized:
+                # warm start for the optimization
+                optimized = False
+                x_init = np.array([[self.rate_beta[r,s]]])
+                constants = [r, s, self.rate_alpha[r,s]]
 
-            try:
-                x_final, optimized = optimize_alpha(x_init, data, states, frames, self.rate_beta)
-                if not optimized:
-                    x_init = x_init*(1+0.1*(np.random.rand(V,1)-0.5))
+                while not optimized:
 
-            except ValueError:
-                # if any parameter becomes Inf or Nan during optimization,
-                # or if hessian is negative definite, re-optimize with a cold start
-                x_init = x_init*(1+0.1*(np.random.rand(V,1)-0.5))
+                    try:
+                        x_final, optimized = optimize_alpha(x_init, data, states, frames, self.rescale, constants)
+                        if optimized:
+                            self.rate_alpha[r,s] = x_final[0,0]
 
-        self.rate_alpha = x_final.reshape(4,self.S)
+                    except ValueError:
+                        # if any parameter becomes Inf or Nan during optimization,
+                        # or if hessian is negative definite, re-optimize with a cold start
+                        x_init = x_init*(1+0.1*(np.random.rand(1,1)-0.5))
 
     def __reduce__(self):
-        return (rebuild_Emission, (self.logperiodicity, self.rate_alpha, self.rate_beta))
+        return (rebuild_Emission, (self.periodicity, self.rate_alpha, self.rate_beta))
 
-def rebuild_Emission(per, alpha, beta, start):
-    e = Emission(start, 1)
-    e.logperiodicity = per
+def rebuild_Emission(periodicity, alpha, beta):
+    e = Emission()
+    e.periodicity = periodicity
+    e.logperiodicity = np.log(periodicity)
     e.rate_alpha = alpha
     e.rate_beta = beta
+    e.compute_rescaling()
     return e
 
-def optimize_alpha(x_init, data, states, frames, beta):
+def optimize_periodicity(x_init, constants):
+
+    def F(x=None, z=None):
+
+        if x is None:
+            return 0, cvx.matrix(x_init)
+
+        xx = np.array(x).reshape(1,3)
+        At = constants[0]
+        Bt = constants[1]
+        Ct = constants[2]
+        Et = constants[3]
+        ab = constants[4]
+
+        # compute function
+        func = np.sum(At * np.log(xx)) - 
+               np.sum(Bt * np.log((1-xx)*Et+ab),0) -
+               np.sum(Ct * np.log(xx*Et+ab),0)
+        if np.isnan(func) or np.isinf(func):
+            f = np.array([np.finfo(np.float32).max]).astype(np.float64)
+        else:
+            f = np.array([-1*func]).astype(np.float64)
+
+        # compute gradient
+        Df = At/xx[0] + np.sum(Bt * Et/((1-xx)*Et+ab),0) - 
+             np.sum(Ct * Et/(xx*Et+ab),0)
+        if np.isnan(Df).any() or np.isinf(Df).any():
+            Df = -1 * np.finfo(np.float32).max * 
+                 np.ones((1,xx.size), dtype=np.float64)
+        else:
+            Df = -1*Df.reshape(1,xx.size)
+
+        if z is None:
+            return cvx.matrix(f), cvx.matrix(Df)
+
+        # compute hessian
+        hess = 1.*At/xx[0]**2 - np.sum(Bt * Et**2/((1-xx)*Et+ab)**2,0) -
+               np.sum(Ct * Et**2/(xx*Et+ab)**2,0)
+
+        # check if hessian is positive semi-definite
+        if np.any(hess<0):
+            raise ValueError
+        else:
+            hess = z[0] * np.diag(hess)
+
+        return cvx.matrix(f), cvx.matrix(Df), cvx.matrix(hess)
+
+    V = x_init.size
+    # specify constraints on variables
+    G = cvx.matrix(np.diag(-1*np.ones((V,), dtype=np.float64)))
+    h = cvx.matrix(np.zeros((V,1), dtype=np.float64))
+    A = cvx.matrix(np.ones((1,V), dtype=np.float64))
+    b = cvx.matrix(np.ones((1,1), dtype=np.float64))
+
+    # call a constrained nonlinear solver
+    solution = solvers.cp(F, G=G, h=h, A=A, b=b)
+
+    if solution['status'] in ['optimal','unknown']:
+        optimized = True
+    else:
+        optimized = False
+    x_final = np.array(solution['x']).ravel()
+
+    return x_final, optimized
+
+def optimize_beta(x_init, data, states, frames, rescale, constants):
 
     def F(x=None, z=None):
 
@@ -1009,7 +1078,7 @@ def optimize_alpha(x_init, data, states, frames, beta):
 
         if z is None:
             # compute likelihood function and gradient
-            results = alpha_func_grad(xx, data, states, frames, beta)
+            results = beta_func_grad(xx, data, states, frames, rescale, constants)
 
             # check for infs or nans
             fd = results[0]
@@ -1028,7 +1097,7 @@ def optimize_alpha(x_init, data, states, frames, beta):
 
         else:
             # compute function, gradient, and hessian
-            results = alpha_func_grad_hess(xx, data, states, frames, beta)
+            results = beta_func_grad_hess(xx, data, states, frames, rescale, constants)
 
             # check for infs or nans
             fd = results[0]
@@ -1045,21 +1114,15 @@ def optimize_alpha(x_init, data, states, frames, beta):
 
             # check if hessian is positive semi-definite
             hess = results[2]
-            eigs = np.linalg.eig(hess)
-            if np.any(eigs[0]<0):
+            if hess[0,0]<0:
                 raise ValueError
-                # set hard constraint at parameters that give negative definite hessian
-                #f = np.array([np.finfo(np.float32).max]).astype(np.float64)
-                #eigval = np.abs(eigs[0])
-                #hess = np.dot(eigs[1],np.dot(np.diag(eigval),eigs[1].T))
             hess = z[0] * hess
 
             return cvx.matrix(f), cvx.matrix(Df), cvx.matrix(hess)
 
-    V = x_init.size
     # specify constraints on variables
-    G = cvx.matrix(np.diag(-1*np.ones((V,), dtype='float')))
-    h = cvx.matrix(np.zeros((V,1), dtype='float'))
+    G = cvx.matrix(np.diag(-1*np.ones((1,), dtype='float')))
+    h = cvx.matrix(np.zeros((1,1), dtype='float'))
 
     # call a constrained nonlinear solver
     solution = solvers.cp(F, G=G, h=h)
@@ -1075,141 +1138,339 @@ def optimize_alpha(x_init, data, states, frames, beta):
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.nonecheck(False)
-cdef tuple alpha_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, \
-list states, list frames, np.ndarray[np.float64_t, ndim=2] beta):
+cdef tuple beta_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, list constants):
 
     cdef Data datum
     cdef State state
     cdef Frame frame
-    cdef long r, V, f, l, s
-    cdef double func, psum
-    cdef np.ndarray[np.int64_t, ndim=1] indices
-    cdef np.ndarray[np.float64_t, ndim=1] Df, pos, bb
-    cdef np.ndarray[np.float64_t, ndim=2] aa, dd, cc, ab, lbab, df
+    cdef long r, s, f, l
+    cdef double alpha, func
+    cdef np.ndarray gradient, mask, new_scale
 
-    V = x.size
+    r = constants[0]
+    s = constants[1]
+    alpha = constants[2]
+
     func = 0
-    df = np.zeros((4,V/4),dtype=float)
-    aa = np.empty((4,V/4), dtype=float)
-
-    for r from 0 <= r < 4:
-        aa[r] = x[r*V/4:(r+1)*V/4]
-    ab = aa*beta
-    dd = ab*np.log(beta) - gammaln(ab)
-    lbab = np.log(beta) - digamma(ab)
+    gradient = np.zeros((1,), dtype=np.float64)
     for datum,state,frame in zip(data,states,frames):
+                    
+        for f in xrange(3):
 
-        cc = np.log(beta + datum.scale)
-        for s from 0 <= s < V/4:
-    
-            for r from 0 <= r < 4:
+            new_scale = rescale[r,s,datum.rescale_indices[r,f,:]]
+            mask = new_scale!=0
+            func = func + frame.max_posterior * np.sum(state.pos_first_moment[f,mask,s] * 
+                   (alpha*x*np.log(x) + gammaln(datum.total[f,mask,r]+alpha*x) - 
+                    gammaln(alpha*x) - (datum.total[f,mask,r]+alpha*x)*np.log(datum.scale*new_scale+x)))
 
-                for f from 0 <= f < 3:
+            gradient = gradient + frame.max_posterior[f] * np.sum(state.pos_first_moment[f,mask,s] * 
+                       (alpha * (np.log(x) + 1 + digamma(datum.total[f,mask,r]+alpha*x) - 
+                        digamma(alpha*x) - np.log(datum.scale*new_scale+x)) + 
+                       (datum.total[f,mask,r]+alpha*x)/(datum.scale*new_scale+x)))
 
-                    indices = datum.indices[f][r][s]
-                    pos = state.pos_first_moment[f,indices,s]
-                    psum = np.sum(pos)
-                    bb = ab[r,s] + datum.total[f,indices,r]
-                    func = func + frame.posterior[f] * ((dd[r,s]-ab[r,s]*cc[r,s])*psum + np.sum(pos*gammaln(bb)))
-                    df[r,s] = df[r,s] + frame.posterior[f] * (np.sum(pos*digamma(bb)) + psum*(lbab[r,s]-cc[r,s]))
+            if s==0:
 
-                    if s==0:
+                # add extra terms for first state
+                for l from 0 <= l < f:
+                    if datum.mappable[l,r]:
+                        func = func + frame.posterior[f] * (alpha*x*np.log(x) + 
+                               gammaln(datum.obs[l,r]+alpha*x) - gammaln(alpha*x) - 
+                               (datum.obs[l,r]+alpha*x)*np.log(datum.scale/3.+x))
+                        gradient = gradient + frame.posterior[f] * (alpha * (np.log(x) + 
+                                   1 + digamma(datum.obs[l,r]+alpha*x) - digamma(alpha*x) - 
+                                   np.log(datum.scale/3.+x)) + (datum.obs[l,r]+alpha*x)/(datum.scale/3.+x))
 
-                        # add extra terms for first state
-                        for l from 0 <= l < f:
-                            if not datum.missing[l,r]:
-                                func = func + frame.posterior[f] * (dd[r,0] \
-                                    - ab[r,0]*np.log(beta[r,0]+datum.scale/3.) + gammaln(ab[r,0]+datum.obs[l,r]))
-                                df[r,0] = df[r,0] + frame.posterior[f] * (lbab[r,0] \
-                                    - np.log(beta[r,0]+datum.scale/3.) + digamma(ab[r,0]+datum.obs[l,r]))
+            if s==8:
 
-                    if s==8:
-
-                        # add extra terms for last state
-                        for l from 3*datum.M+f <= l < datum.L:
-                            if not datum.missing[l,r]:
-                                func = func + frame.posterior[f] * (dd[r,8] \
-                                    - ab[r,8]*np.log(beta[r,8]+datum.scale/3.) + gammaln(ab[r,8]+datum.obs[l,r]))
-                                df[r,8] = df[r,8] + frame.posterior[f] * (lbab[r,8] \
-                                    - np.log(beta[r,8]+datum.scale/3.) + digamma(ab[r,8]+datum.obs[l,r]))
+                # add extra terms for last state
+                for l from 3*datum.M+f <= l < datum.L:
+                    if datum.mappable[l,r]:
+                        func = func + frame.posterior[f] * (alpha*x*np.log(x) + 
+                               gammaln(datum.obs[l,r]+alpha*x) - gammaln(alpha*x) - 
+                               (datum.obs[l,r]+alpha*x)*np.log(datum.scale/3.+x))
+                        gradient = gradient + frame.posterior[f] * (alpha * (np.log(x) + 
+                                   1 + digamma(datum.obs[l,r]+alpha*x) - digamma(alpha*x) - 
+                                   np.log(datum.scale/3.+x)) + (datum.obs[l,r]+alpha*x)/(datum.scale/3.+x))
 
     func = -1.*func
-    Df = -1.*beta.ravel()*df.ravel()
+    gradient = -1.*gradient
 
-    return func, Df
+    return func, gradient
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.nonecheck(False)
-cdef tuple alpha_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, \
-list states, list frames, np.ndarray[np.float64_t, ndim=2] beta):
+cdef tuple beta_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, list constants):
 
     cdef Data datum
     cdef State state
     cdef Frame frame
-    cdef long r, V, f, l, s
-    cdef double func, psum, hftmp
-    cdef np.ndarray[np.int64_t, ndim=1] indices
-    cdef np.ndarray[np.float64_t, ndim=1] Df, pos, bb
-    cdef np.ndarray[np.float64_t, ndim=2] aa, dd, cc, ab, lbab, df, Hf, diag, pab
+    cdef long r, s, f, l
+    cdef double alpha, func
+    cdef np.ndarray gradient, hessian, new_scale, mask
 
-    V = x.size
+    r = constants[0]
+    s = constants[1]
+    alpha = constants[2]
+
     func = 0
-    df = np.zeros((4,V/4),dtype=float)
-    Hf = np.zeros((V,V),dtype=float)
-    diag = np.zeros((4,V/4), dtype=float)
-    aa = np.empty((4,V/4), dtype=float)
-
-    for r from 0 <= r < 4:
-        aa[r] = x[r*V/4:(r+1)*V/4]
-    ab = aa*beta
-    dd = ab*np.log(beta) - gammaln(ab)
-    lbab = np.log(beta) - digamma(ab)
-    pab = polygamma(1, ab)
+    gradient = np.zeros((1,), dtype=np.float64)
+    hessian = np.zeros((1,1), dtype=np.float64)
     for datum,state,frame in zip(data,states,frames):
+                    
+        for f in xrange(3):
 
-        cc = np.log(beta + datum.scale)
-        for s from 0 <= s < V/4:
-    
-            for r from 0 <= r < 4:
+            new_scale = rescale[r,s,datum.rescale_indices[r,f,:]]
+            mask = new_scale!=0
+            func = func + frame.max_posterior * np.sum(state.pos_first_moment[f,mask,s] * 
+                   (alpha*x*np.log(x) + gammaln(datum.total[f,mask,r]+alpha*x) - 
+                    gammaln(alpha*x) - (datum.total[f,mask,r]+alpha*x)*np.log(datum.scale*new_scale+x)))
 
-                for f from 0 <= f < 3:
+            gradient = gradient + frame.max_posterior[f] * np.sum(state.pos_first_moment[f,mask,s] * 
+                       (alpha * (np.log(x) + 1 + digamma(datum.total[f,mask,r]+alpha*x) - 
+                        digamma(alpha*x) - np.log(datum.scale*new_scale+x)) + 
+                       (datum.total[f,mask,r]+alpha*x)/(datum.scale*new_scale+x)))
 
-                    indices = datum.indices[f][r][s]
-                    pos = state.pos_first_moment[f,indices,s]
-                    psum = np.sum(pos)
-                    bb = ab[r,s] + datum.total[f,indices,r]
-                    func = func + frame.posterior[f] * (np.sum(pos*gammaln(bb)) + (dd[r,s]-ab[r,s]*cc[r,s])*psum)
-                    df[r,s] = df[r,s] + frame.posterior[f] * (np.sum(pos*digamma(bb)) + psum*(lbab[r,s]-cc[r,s]))
-                    diag[r,s] = diag[r,s] + frame.posterior[f] * (np.sum(pos*polygamma(1, bb)) - psum*pab[r,s])
+            hessian = hessian + frame.max_posterior[f] * np.sum(state.pos_first_moment[f,mask,s] * 
+                       (alpha * (alpha*polygamma(1,datum.total[f,mask,r]+alpha*x) - 
+                        alpha*polygamma(1,alpha*x) + (datum.scale*new_scale+1)/(datum.scale*new_scale+x)) - 
+                       (datum.total[f,mask,r]+alpha*x)/(datum.scale*new_scale+x)**2))
 
-                    if s==0:
+            if s==0:
 
-                        # add extra terms for first state
-                        for l from 0 <= l < f:
-                            if not datum.missing[l,r]:
-                                func = func + frame.posterior[f] * (dd[r,0] \
-                                    - ab[r,0]*np.log(beta[r,0]+datum.scale/3.) + gammaln(ab[r,0]+datum.obs[l,r]))
-                                df[r,0] = df[r,0] + frame.posterior[f] * (lbab[r,0] \
-                                    - np.log(beta[r,0]+datum.scale/3.) + digamma(ab[r,0]+datum.obs[l,r]))
-                                diag[r,0] = diag[r,0] + frame.posterior[f] * (polygamma(1,ab[r,0]+datum.obs[l,r])-pab[r,0])
+                # add extra terms for first state
+                for l from 0 <= l < f:
+                    if datum.mappable[l,r]:
+                        func = func + frame.posterior[f] * (alpha*x*np.log(x) + 
+                               gammaln(datum.obs[l,r]+alpha*x) - gammaln(alpha*x) - 
+                               (datum.obs[l,r]+alpha*x)*np.log(datum.scale/3.+x))
+                        gradient = gradient + frame.posterior[f] * (alpha * (np.log(x) + 
+                                   1 + digamma(datum.obs[l,r]+alpha*x) - digamma(alpha*x) - 
+                                   np.log(datum.scale/3.+x)) + (datum.obs[l,r]+alpha*x)/(datum.scale/3.+x))
+                        hessian = hessian + frame.posterior[f] * (alpha * 
+                                  (alpha*polygamma(1,datum.obs[l,r]+alpha*x) - alpha*polygamma(1,alpha*x) + 
+                                  (datum.scale/3.+1)/(datum.scale/3.+x)) - (datum.total[l,r]+alpha*x)/(datum.scale/3.+x)**2)
 
-                    if s==8:
+            if s==8:
 
-                        # add extra terms for last state
-                        for l from 3*datum.M+f <= l < datum.L:
-                            if not datum.missing[l,r]:
-                                func = func + frame.posterior[f] * (dd[r,8] \
-                                    - ab[r,8]*np.log(beta[r,8]+datum.scale/3.) + gammaln(ab[r,8]+datum.obs[l,r]))
-                                df[r,8] = df[r,8] + frame.posterior[f] * (lbab[r,8] \
-                                    - np.log(beta[r,8]+datum.scale/3.) + digamma(ab[r,8]+datum.obs[l,r]))
-                                diag[r,8] = diag[r,8] + frame.posterior[f] * (polygamma(1,ab[r,8]+datum.obs[l,r])-pab[r,8])
+                # add extra terms for last state
+                for l from 3*datum.M+f <= l < datum.L:
+                    if datum.mappable[l,r]:
+                        func = func + frame.posterior[f] * (alpha*x*np.log(x) + 
+                               gammaln(datum.obs[l,r]+alpha*x) - gammaln(alpha*x) - 
+                               (datum.obs[l,r]+alpha*x)*np.log(datum.scale/3.+x))
+                        gradient = gradient + frame.posterior[f] * (alpha * (np.log(x) + 
+                                   1 + digamma(datum.obs[l,r]+alpha*x) - digamma(alpha*x) - 
+                                   np.log(datum.scale/3.+x)) + (datum.obs[l,r]+alpha*x)/(datum.scale/3.+x))
+                        hessian = hessian + frame.posterior[f] * (alpha * 
+                                  (alpha*polygamma(1,datum.obs[l,r]+alpha*x) - alpha*polygamma(1,alpha*x) + 
+                                  (datum.scale/3.+1)/(datum.scale/3.+x)) - (datum.total[l,r]+alpha*x)/(datum.scale/3.+x)**2)
 
     func = -1.*func
-    Df = -1.*beta.ravel()*df.ravel()
-    Hf[range(V),range(V)] = -1*beta.ravel()**2*diag.ravel()
+    gradient = -1.*gradient
+    hessian = -1.*hessian
 
-    return func, Df, Hf
+    return func, gradient, hessian
+
+def optimize_alpha(x_init, data, states, frames, rescale, constants):
+
+    def F(x=None, z=None):
+
+        if x is None:
+            return 0, cvx.matrix(x_init)
+
+        xx = np.array(x).ravel().astype(np.float64)
+
+        if z is None:
+            # compute likelihood function and gradient
+            results = alpha_func_grad(xx, data, states, frames, rescale, constants)
+
+            # check for infs or nans
+            fd = results[0]
+            if np.isnan(fd) or np.isinf(fd):
+                f = np.array([np.finfo(np.float32).max]).astype(np.float64)
+            else:
+                f = np.array([fd]).astype(np.float64)
+
+            Df = results[1]
+            if np.isnan(Df).any() or np.isinf(Df).any():
+                Df = -1 * np.finfo(np.float32).max * np.ones((1,xx.size), dtype=np.float64)
+            else:
+                Df = Df.reshape(1,xx.size)
+
+            return cvx.matrix(f), cvx.matrix(Df)
+
+        else:
+            # compute function, gradient, and hessian
+            results = alpha_func_grad_hess(xx, data, states, frames, rescale, constants)
+
+            # check for infs or nans
+            fd = results[0]
+            if np.isnan(fd) or np.isinf(fd):
+                f = np.array([np.finfo(np.float32).max]).astype(np.float64)
+            else:
+                f = np.array([fd]).astype(np.float64)
+
+            Df = results[1]
+            if np.isnan(Df).any() or np.isinf(Df).any():
+                Df = -1 * np.finfo(np.float32).max * np.ones((1,xx.size), dtype=np.float64)
+            else:
+                Df = Df.reshape(1,xx.size)
+
+            # check if hessian is positive semi-definite
+            hess = results[2]
+            if hess[0,0]<0:
+                raise ValueError
+            hess = z[0] * hess
+
+            return cvx.matrix(f), cvx.matrix(Df), cvx.matrix(hess)
+
+    # specify constraints on variables
+    G = cvx.matrix(np.diag(-1*np.ones((1,), dtype=np.float64)))
+    h = cvx.matrix(np.zeros((1,1), dtype=np.float64))
+
+    # call a constrained nonlinear solver
+    solution = solvers.cp(F, G=G, h=h)
+
+    if solution['status'] in ['optimal','unknown']:
+        optimized = True
+    else:
+        optimized = False
+    x_final = np.array(solution['x']).ravel()
+
+    return x_final, optimized
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.nonecheck(False)
+cdef tuple alpha_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, list constants):
+
+    cdef Data datum
+    cdef State state
+    cdef Frame frame
+    cdef long r, s, f, l
+    cdef double beta, func
+    cdef np.ndarray gradient, mask, new_scale
+
+    r = constants[0]
+    s = constants[1]
+    beta = constants[2]
+
+    func = 0
+    gradient = np.zeros((1,), dtype=np.float64)
+    for datum,state,frame in zip(data,states,frames):
+                    
+        for f in xrange(3):
+
+            new_scale = rescale[r,s,datum.rescale_indices[r,f,:]]
+            mask = new_scale!=0
+            func = func + frame.max_posterior * np.sum(state.pos_first_moment[f,mask,s] * 
+                   (x*beta*np.log(beta) + gammaln(datum.total[f,mask,r]+x*beta) - 
+                    gammaln(x*beta) - (datum.total[f,mask,r]+x*beta)*np.log(datum.scale*new_scale+beta)))
+
+            gradient = gradient + frame.max_posterior[f] * np.sum(state.pos_first_moment[f,mask,s] * 
+                       (beta * (np.log(beta) + digamma(datum.total[f,mask,r]+x*beta) - 
+                        digamma(x*beta) - np.log(datum.scale*new_scale+beta))))
+
+            if s==0:
+
+                # add extra terms for first state
+                for l from 0 <= l < f:
+                    if datum.mappable[l,r]:
+                        func = func + frame.posterior[f] * (x*beta*np.log(beta) + 
+                               gammaln(datum.obs[l,r]+x*beta) - gammaln(x*beta) - 
+                               (datum.obs[l,r]+x*beta) * np.log(datum.scale/3.+beta))
+                        gradient = gradient + frame.posterior[f] * beta * (np.log(beta) + 
+                                   digamma(datum.obs[l,r]+x*beta) - digamma(x*beta) - 
+                                   np.log(datum.scale/3.+beta))
+
+            if s==8:
+
+                # add extra terms for last state
+                for l from 3*datum.M+f <= l < datum.L:
+                    if datum.mappable[l,r]:
+                        func = func + frame.posterior[f] * (x*beta*np.log(beta) + 
+                               gammaln(datum.obs[l,r]+x*beta) - gammaln(x*beta) - 
+                               (datum.obs[l,r]+x*beta) * np.log(datum.scale/3.+beta))
+                        gradient = gradient + frame.posterior[f] * beta * (np.log(beta) + 
+                                   digamma(datum.obs[l,r]+x*beta) - digamma(x*beta) - 
+                                   np.log(datum.scale/3.+beta))
+
+    func = -1.*func
+    gradient = -1.*gradient
+
+    return func, gradient
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.nonecheck(False)
+cdef tuple alpha_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, list constants):
+
+    cdef Data datum
+    cdef State state
+    cdef Frame frame
+    cdef long r, s, f
+    cdef double beta, func
+    cdef np.ndarray gradient, mask, new_scale
+
+    r = constants[0]
+    s = constants[1]
+    beta = constants[2]
+
+    func = 0
+    gradient = np.zeros((1,), dtype=np.float64)
+    hessian = np.zeros((1,1), dtype=np.float64)
+    for datum,state,frame in zip(data,states,frames):
+                    
+        for f in xrange(3):
+
+            new_scale = rescale[r,s,datum.rescale_indices[r,f,:]]
+            mask = new_scale!=0
+            func = func + frame.max_posterior * np.sum(state.pos_first_moment[f,mask,s] * 
+                   (x*beta*np.log(beta) + gammaln(datum.total[f,mask,r]+x*beta) - 
+                    gammaln(x*beta) - (datum.total[f,mask,r]+x*beta)*np.log(datum.scale*new_scale+beta)))
+
+            gradient = gradient + frame.max_posterior[f] * np.sum(state.pos_first_moment[f,mask,s] * 
+                       (beta * (np.log(beta) + digamma(datum.total[f,mask,r]+x*beta) - 
+                        digamma(x*beta) - np.log(datum.scale*new_scale+beta))))
+
+            hessian = hessian + frame.max_posterior[f] * np.sum(state.pos_first_moment[f,mask,s] * 
+                      beta**2 * (polygamma(1,datum.total[f,mask,r]+x*beta) - 
+                      polygamma(1,x*beta)))
+
+            if s==0:
+
+                # add extra terms for first state
+                for l from 0 <= l < f:
+                    if datum.mappable[l,r]:
+                        func = func + frame.posterior[f] * (x*beta*np.log(beta) + 
+                               gammaln(datum.obs[l,r]+x*beta) - gammaln(x*beta) - 
+                               (datum.obs[l,r]+x*beta) * np.log(datum.scale/3.+beta))
+                        gradient = gradient + frame.posterior[f] * beta * (np.log(beta) + 
+                                   digamma(datum.obs[l,r]+x*beta) - digamma(x*beta) - 
+                                   np.log(datum.scale/3.+beta))
+                        hessian = hessian + frame.posterior[f] * beta**2 * 
+                                  (polygamma(1,datum.obs[l,r]+x*beta) - polygamma(1,x*beta))
+
+            if s==8:
+
+                # add extra terms for last state
+                for l from 3*datum.M+f <= l < datum.L:
+                    if datum.mappable[l,r]:
+                        func = func + frame.posterior[f] * (x*beta*np.log(beta) + 
+                               gammaln(datum.obs[l,r]+x*beta) - gammaln(x*beta) - 
+                               (datum.obs[l,r]+x*beta) * np.log(datum.scale/3.+beta))
+                        gradient = gradient + frame.posterior[f] * beta * (np.log(beta) + 
+                                   digamma(datum.obs[l,r]+x*beta) - digamma(x*beta) - 
+                                   np.log(datum.scale/3.+beta))
+                        hessian = hessian + frame.posterior[f] * beta**2 * 
+                                  (polygamma(1,datum.obs[l,r]+x*beta) - polygamma(1,x*beta))
+
+    func = -1.*func
+    gradient = -1.*gradient
+    hessian = -1.*hessian
+
+    return func, gradient, hessian
 
 def learn_parameters(observations, codon_id, scales, mappability, restarts, mintol):
 
@@ -1225,8 +1486,9 @@ def learn_parameters(observations, codon_id, scales, mappability, restarts, mint
     cdef State state
     cdef Frame frame
 
-    data = [Data(observation, id, scale, mappable) \
-        for observation, id, scale, mappable in zip(observations, codon_id, scales, mappability)]
+    data = [Data(observation, id, scale, mappable)
+            for observation, id, scale, mappable in 
+            zip(observations, codon_id, scales, mappability)]
     Ls = []
     Lmax = -np.inf
 
@@ -1298,7 +1560,7 @@ def learn_parameters(observations, codon_id, scales, mappability, restarts, mint
 
         # update occupancy precision
         starttime = time.time()
-        emission.update_beta(data, states, frames, 1e-3)
+        emission.update_beta(data, states, frames)
         print "%.2f sec to update beta"%(time.time()-starttime)
 
         # update occupancy mean
@@ -1356,7 +1618,7 @@ def learn_parameters(observations, codon_id, scales, mappability, restarts, mint
             # update emission parameters
             starttime = time.time()
             emission.update_periodicity(data, states, frames)
-            emission.update_beta(data, states, frames, 1e-3)
+            emission.update_beta(data, states, frames)
             emission.update_alpha(data, states, frames)
             print "%.2f sec to update emission"%(time.time()-starttime)
 
