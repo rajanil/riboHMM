@@ -50,7 +50,6 @@ cdef class Transition:
 cdef class Emission:
 
     cdef public long S, R
-    cdef public bool restrict
     cdef public np.ndarray periodicity, logperiodicity, rate_alpha, rate_beta, rescale
 
 cdef double normalize(np.ndarray[np.float64_t, ndim=1] x)

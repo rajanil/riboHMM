@@ -94,50 +94,48 @@ cdef class Data:
                     if np.all(self.mappable[3*m+f:3*m+3+f,r]) else
                     self.obs[3*m+f:3*m+3+f,r][self.mappable[3*m+f:3*m+3+f,r]]
                     * (emission.logperiodicity[r,self.mappable[3*m+f:3*m+3+f,r],:]
-                    - np.log(utils.insum(emission.periodicity[r,self.mappable[3*m+f:3*m+3+f,r],:],[1])))
+                    - utils.nplog(utils.insum(emission.periodicity[r,self.mappable[3*m+f:3*m+3+f,r],:],[1])))
                     if np.count_nonzero(self.mappable[3*m+f:3*m+3+f,r])==2 else
                     0 for m in xrange(self.M)])
 
-                if not emission.restrict:
-
-                    # occupancy likelihood, accounting for mappability
-                    mask = datum.rescale_indices[r,f,:]==0
+                # occupancy likelihood, accounting for mappability
+                mask = datum.rescale_indices[r,f,:]==0
+                rescale = emission.rescale[r,s,datum.rescale_indices[r,f,:]]
+                rate_log_likelihood = emission.rate_alpha[r] * emission.rate_beta[r] \
+                    * utils.nplog(emission.rate_beta[r]) + gammaln(emission.rate_alpha[r] \
+                    * emission.rate_beta[r] + self.total[f,:,r:r+1]) \
+                    - gammaln(emission.rate_alpha[r] * emission.rate_beta[r]) \
+                    - gammaln(self.total[f,:,r:r+1]+1)
+                for s in xrange(emission.S):
                     rescale = emission.rescale[r,s,datum.rescale_indices[r,f,:]]
-                    rate_log_likelihood = emission.rate_alpha[r] * emission.rate_beta[r] \
-                        * utils.nplog(emission.rate_beta[r]) + gammaln(emission.rate_alpha[r] \
-                        * emission.rate_beta[r] + self.total[f,:,r:r+1]) \
-                        - gammaln(emission.rate_alpha[r] * emission.rate_beta[r]) \
-                        - gammaln(self.total[f,:,r:r+1]+1)
-                    for s in xrange(emission.S):
-                        rescale = emission.rescale[r,s,datum.rescale_indices[r,f,:]]
-                        rate_log_likelihood[:,s] = rate_log_likelihood[:,s] - (emission.rate_alpha[r,s] * 
-                                                   emission.rate_beta[r,s] + self.total[f,:,r:r+1]) * 
-                                                   utils.nplog(emission.rate_beta[r,s] + self.scale*rescale)
-                        rate_log_likelihood[mask,s] = rate_log_likelihood[mask,s] + self.total[f,mask,r:r+1] * 
-                                                      utils.nplog(rescale[mask]*self.scale)
-                    rate_log_likelihood[mask] = 0
-                    log_likelihood += rate_log_likelihood
+                    rate_log_likelihood[:,s] = rate_log_likelihood[:,s] - (emission.rate_alpha[r,s] * 
+                                               emission.rate_beta[r,s] + self.total[f,:,r:r+1]) * 
+                                               utils.nplog(emission.rate_beta[r,s] + self.scale*rescale)
+                    rate_log_likelihood[mask,s] = rate_log_likelihood[mask,s] + self.total[f,mask,r:r+1] * 
+                                                  utils.nplog(rescale[mask]*self.scale)
+                rate_log_likelihood[mask] = 0
+                log_likelihood += rate_log_likelihood
 
-                    # likelihood of extra positions
-                    for l from 0 <= l < f:
-                        if self.mappable[l,r]:
-                            self.extra_log_likelihood[f] += emission.rate_alpha[r,0] * emission.rate_beta[r,0] \
-                                * utils.nplog(emission.rate_beta[r,0]) - (emission.rate_alpha[r,0] \
-                                * emission.rate_beta[r,0] + self.obs[l,r]) \
-                                * utils.nplog(emission.rate_beta[r,0] + self.scale/3.) \
-                                + gammaln(emission.rate_alpha[r,0] * emission.rate_beta[r,0] + self.obs[l,r]) \
-                                - gammaln(emission.rate_alpha[r,0] * emission.rate_beta[r,0]) \
-                                + self.obs[l,r] * utils.nplog(self.scale/3.) - gammaln(self.obs[l,r]+1)
-                    for l from 3*self.M+f <= l < self.L:
-                        if self.mappable[l,r]:
-                            self.extra_log_likelihood[f] += emission.rate_alpha[r,emission.S-1] \
-                                * emission.rate_beta[r,emission.S-1] * utils.nplog(emission.rate_beta[r,emission.S-1]) \
-                                - (emission.rate_alpha[r,emission.S-1] * emission.rate_beta[r,emission.S-1] \
-                                + self.obs[l,r]) * utils.nplog(emission.rate_beta[r,emission.S-1] \
-                                + self.scale/3.) + gammaln(emission.rate_alpha[r,emission.S-1] \
-                                * emission.rate_beta[r,emission.S-1] + self.obs[l,r]) \
-                                - gammaln(emission.rate_alpha[r,emission.S-1] * emission.rate_beta[r,emission.S-1]) \
-                                + self.obs[l,r] * utils.nplog(self.scale/3.) - gammaln(self.obs[l,r]+1)
+                # likelihood of extra positions
+                for l from 0 <= l < f:
+                    if self.mappable[l,r]:
+                        self.extra_log_likelihood[f] += emission.rate_alpha[r,0] * emission.rate_beta[r,0] \
+                            * utils.nplog(emission.rate_beta[r,0]) - (emission.rate_alpha[r,0] \
+                            * emission.rate_beta[r,0] + self.obs[l,r]) \
+                            * utils.nplog(emission.rate_beta[r,0] + self.scale/3.) \
+                            + gammaln(emission.rate_alpha[r,0] * emission.rate_beta[r,0] + self.obs[l,r]) \
+                            - gammaln(emission.rate_alpha[r,0] * emission.rate_beta[r,0]) \
+                            + self.obs[l,r] * utils.nplog(self.scale/3.) - gammaln(self.obs[l,r]+1)
+                for l from 3*self.M+f <= l < self.L:
+                    if self.mappable[l,r]:
+                        self.extra_log_likelihood[f] += emission.rate_alpha[r,emission.S-1] \
+                            * emission.rate_beta[r,emission.S-1] * utils.nplog(emission.rate_beta[r,emission.S-1]) \
+                            - (emission.rate_alpha[r,emission.S-1] * emission.rate_beta[r,emission.S-1] \
+                            + self.obs[l,r]) * utils.nplog(emission.rate_beta[r,emission.S-1] \
+                            + self.scale/3.) + gammaln(emission.rate_alpha[r,emission.S-1] \
+                            * emission.rate_beta[r,emission.S-1] + self.obs[l,r]) \
+                            - gammaln(emission.rate_alpha[r,emission.S-1] * emission.rate_beta[r,emission.S-1]) \
+                            + self.obs[l,r] * utils.nplog(self.scale/3.) - gammaln(self.obs[l,r]+1)
 
                 self.log_likelihood[f] += log_likelihood
    
@@ -818,7 +816,6 @@ cdef class Emission:
         cdef np.ndarray[np.float64_t, ndim=1] alpha_pattern
         cdef np.ndarray[np.float64_t, ndim=2] periodicity
 
-        self.restrict = True
         self.S = 9
         self.R = len(utils.READ_LENGTHS)
         self.periodicity = np.empty((self.R,3,self.S), dtype=np.float64)
@@ -833,7 +830,7 @@ cdef class Emission:
             periodicity = np.ones((3,self.S), dtype=np.float64)
             periodicity[:,1:self.S-1] = np.random.rand(self.S-2)
             self.periodicity[r] = periodicity/periodicity.sum(0)
-            self.logperiodicity[r] = np.log(self.periodicity[r])
+            self.logperiodicity[r] = utils.nplog(self.periodicity[r])
 
             self.rate_alpha[r] = alpha_pattern*np.exp(np.random.normal(0,0.01,self.S))
             self.rate_beta[r] = 1.e4*np.random.rand(self.S)
@@ -871,32 +868,26 @@ cdef class Emission:
                     for f in xrange(3):
                         
                         At[0] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*datum.obs[3*m+f,r] 
-                              for m in xrange(datum.M) if datum.mappable[3*m+f] and 
-                              (datum.mappable[3*m+f+1] or datum.mappable[3*m+f+2])])
+                              for m in xrange(datum.M) if datum.mappable[3*m+f,r] and 
+                              (datum.mappable[3*m+f+1,r] or datum.mappable[3*m+f+2,r])])
                         At[1] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*datum.obs[3*m+f+1,r] 
-                              for m in xrange(datum.M) if datum.mappable[3*m+f+1] and 
-                              (datum.mappable[3*m+f] or datum.mappable[3*m+f+2])])
+                              for m in xrange(datum.M) if datum.mappable[3*m+f+1,r] and 
+                              (datum.mappable[3*m+f,r] or datum.mappable[3*m+f+2,r])])
                         At[2] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*datum.obs[3*m+f+2,r] 
-                              for m in xrange(datum.M) if datum.mappable[3*m+f+2] and 
-                              (datum.mappable[3*m+f] or datum.mappable[3*m+f+1])])
+                              for m in xrange(datum.M) if datum.mappable[3*m+f+2,r] and 
+                              (datum.mappable[3*m+f,r] or datum.mappable[3*m+f+1,r])])
                         Bt[t,0] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*(datum.total[f,m,r]+ab) 
-                                   for m in xrange(self.M) if not datum.mappable[3*m+f] 
-                                   and datum.mappable[3*m+f+1] and datum.mappable[3*m+f+2]])
+                                   for m in xrange(self.M) if datum.rescale_indices[r,f,m]==3])
                         Bt[t,1] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*(datum.total[f,m,r]+ab) 
-                                   for m in xrange(self.M) if datum.mappable[3*m+f] 
-                                   and not datum.mappable[3*m+f+1] and datum.mappable[3*m+f+2]])
+                                   for m in xrange(self.M) if datum.rescale_indices[r,f,m]==5])
                         Bt[t,2] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*(datum.total[f,m,r]+ab) 
-                                   for m in xrange(self.M) if datum.mappable[3*m+f] 
-                                   and datum.mappable[3*m+f+1] and not datum.mappable[3*m+f+2]])
+                                   for m in xrange(self.M) if datum.rescale_indices[r,f,m]==6])
                         Ct[t,0] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*(datum.total[f,m,r]+ab) 
-                                   for m in xrange(self.M) if datum.mappable[3*m+f] 
-                                   and not datum.mappable[3*m+f+1] and not datum.mappable[3*m+f+2]])
+                                   for m in xrange(self.M) if datum.rescale_indices[r,f,m]==4])
                         Ct[t,1] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*(datum.total[f,m,r]+ab) 
-                                   for m in xrange(self.M) if not datum.mappable[3*m+f] 
-                                   and datum.mappable[3*m+f+1] and not datum.mappable[3*m+f+2]])
+                                   for m in xrange(self.M) if datum.rescale_indices[r,f,m]==2])
                         Ct[t,2] += frame.max_posterior[f] * np.array([state.pos_first_moment[f,m,s]*(datum.total[f,m,r]+ab) 
-                                   for m in xrange(self.M) if not datum.mappable[3*m+f] 
-                                   and not datum.mappable[3*m+f+1] and datum.mappable[3*m+f+2]])
+                                   for m in xrange(self.M) if datum.rescale_indices[r,f,m]==1])
 
                 constants = [At, Bt, Ct, Et, self.beta[r,s]]
 
@@ -996,7 +987,7 @@ cdef class Emission:
 def rebuild_Emission(periodicity, alpha, beta):
     e = Emission()
     e.periodicity = periodicity
-    e.logperiodicity = np.log(periodicity)
+    e.logperiodicity = utils.nplog(periodicity)
     e.rate_alpha = alpha
     e.rate_beta = beta
     e.compute_rescaling()
@@ -1017,9 +1008,9 @@ def optimize_periodicity(x_init, constants):
         ab = constants[4]
 
         # compute function
-        func = np.sum(At * np.log(xx)) - 
-               np.sum(Bt * np.log((1-xx)*Et+ab),0) -
-               np.sum(Ct * np.log(xx*Et+ab),0)
+        func = np.sum(At * utils.nplog(xx)) - 
+               np.sum(Bt * utils.nplog((1-xx)*Et+ab),0) -
+               np.sum(Ct * utils.nplog(xx*Et+ab),0)
         if np.isnan(func) or np.isinf(func):
             f = np.array([np.finfo(np.float32).max]).astype(np.float64)
         else:
@@ -1160,12 +1151,12 @@ cdef tuple beta_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, list st
             new_scale = rescale[r,s,datum.rescale_indices[r,f,:]]
             mask = new_scale!=0
             func = func + frame.max_posterior * np.sum(state.pos_first_moment[f,mask,s] * 
-                   (alpha*x*np.log(x) + gammaln(datum.total[f,mask,r]+alpha*x) - 
-                    gammaln(alpha*x) - (datum.total[f,mask,r]+alpha*x)*np.log(datum.scale*new_scale+x)))
+                   (alpha*x*utils.nplog(x) + gammaln(datum.total[f,mask,r]+alpha*x) - 
+                    gammaln(alpha*x) - (datum.total[f,mask,r]+alpha*x)*utils.nplog(datum.scale*new_scale+x)))
 
             gradient = gradient + frame.max_posterior[f] * np.sum(state.pos_first_moment[f,mask,s] * 
-                       (alpha * (np.log(x) + 1 + digamma(datum.total[f,mask,r]+alpha*x) - 
-                        digamma(alpha*x) - np.log(datum.scale*new_scale+x)) + 
+                       (alpha * (utils.nplog(x) + 1 + digamma(datum.total[f,mask,r]+alpha*x) - 
+                        digamma(alpha*x) - utils.nplog(datum.scale*new_scale+x)) + 
                        (datum.total[f,mask,r]+alpha*x)/(datum.scale*new_scale+x)))
 
             if s==0:
@@ -1173,24 +1164,24 @@ cdef tuple beta_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, list st
                 # add extra terms for first state
                 for l from 0 <= l < f:
                     if datum.mappable[l,r]:
-                        func = func + frame.posterior[f] * (alpha*x*np.log(x) + 
+                        func = func + frame.posterior[f] * (alpha*x*utils.nplog(x) + 
                                gammaln(datum.obs[l,r]+alpha*x) - gammaln(alpha*x) - 
-                               (datum.obs[l,r]+alpha*x)*np.log(datum.scale/3.+x))
-                        gradient = gradient + frame.posterior[f] * (alpha * (np.log(x) + 
+                               (datum.obs[l,r]+alpha*x)*utils.nplog(datum.scale/3.+x))
+                        gradient = gradient + frame.posterior[f] * (alpha * (utils.nplog(x) + 
                                    1 + digamma(datum.obs[l,r]+alpha*x) - digamma(alpha*x) - 
-                                   np.log(datum.scale/3.+x)) + (datum.obs[l,r]+alpha*x)/(datum.scale/3.+x))
+                                   utils.nplog(datum.scale/3.+x)) + (datum.obs[l,r]+alpha*x)/(datum.scale/3.+x))
 
             if s==8:
 
                 # add extra terms for last state
                 for l from 3*datum.M+f <= l < datum.L:
                     if datum.mappable[l,r]:
-                        func = func + frame.posterior[f] * (alpha*x*np.log(x) + 
+                        func = func + frame.posterior[f] * (alpha*x*utils.nplog(x) + 
                                gammaln(datum.obs[l,r]+alpha*x) - gammaln(alpha*x) - 
-                               (datum.obs[l,r]+alpha*x)*np.log(datum.scale/3.+x))
-                        gradient = gradient + frame.posterior[f] * (alpha * (np.log(x) + 
+                               (datum.obs[l,r]+alpha*x)*utils.nplog(datum.scale/3.+x))
+                        gradient = gradient + frame.posterior[f] * (alpha * (utils.nplog(x) + 
                                    1 + digamma(datum.obs[l,r]+alpha*x) - digamma(alpha*x) - 
-                                   np.log(datum.scale/3.+x)) + (datum.obs[l,r]+alpha*x)/(datum.scale/3.+x))
+                                   utils.nplog(datum.scale/3.+x)) + (datum.obs[l,r]+alpha*x)/(datum.scale/3.+x))
 
     func = -1.*func
     gradient = -1.*gradient
@@ -1223,12 +1214,12 @@ cdef tuple beta_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, li
             new_scale = rescale[r,s,datum.rescale_indices[r,f,:]]
             mask = new_scale!=0
             func = func + frame.max_posterior * np.sum(state.pos_first_moment[f,mask,s] * 
-                   (alpha*x*np.log(x) + gammaln(datum.total[f,mask,r]+alpha*x) - 
-                    gammaln(alpha*x) - (datum.total[f,mask,r]+alpha*x)*np.log(datum.scale*new_scale+x)))
+                   (alpha*x*utils.nplog(x) + gammaln(datum.total[f,mask,r]+alpha*x) - 
+                    gammaln(alpha*x) - (datum.total[f,mask,r]+alpha*x)*utils.nplog(datum.scale*new_scale+x)))
 
             gradient = gradient + frame.max_posterior[f] * np.sum(state.pos_first_moment[f,mask,s] * 
-                       (alpha * (np.log(x) + 1 + digamma(datum.total[f,mask,r]+alpha*x) - 
-                        digamma(alpha*x) - np.log(datum.scale*new_scale+x)) + 
+                       (alpha * (utils.nplog(x) + 1 + digamma(datum.total[f,mask,r]+alpha*x) - 
+                        digamma(alpha*x) - utils.nplog(datum.scale*new_scale+x)) + 
                        (datum.total[f,mask,r]+alpha*x)/(datum.scale*new_scale+x)))
 
             hessian = hessian + frame.max_posterior[f] * np.sum(state.pos_first_moment[f,mask,s] * 
@@ -1241,12 +1232,12 @@ cdef tuple beta_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, li
                 # add extra terms for first state
                 for l from 0 <= l < f:
                     if datum.mappable[l,r]:
-                        func = func + frame.posterior[f] * (alpha*x*np.log(x) + 
+                        func = func + frame.posterior[f] * (alpha*x*utils.nplog(x) + 
                                gammaln(datum.obs[l,r]+alpha*x) - gammaln(alpha*x) - 
-                               (datum.obs[l,r]+alpha*x)*np.log(datum.scale/3.+x))
-                        gradient = gradient + frame.posterior[f] * (alpha * (np.log(x) + 
+                               (datum.obs[l,r]+alpha*x)*utils.nplog(datum.scale/3.+x))
+                        gradient = gradient + frame.posterior[f] * (alpha * (utils.nplog(x) + 
                                    1 + digamma(datum.obs[l,r]+alpha*x) - digamma(alpha*x) - 
-                                   np.log(datum.scale/3.+x)) + (datum.obs[l,r]+alpha*x)/(datum.scale/3.+x))
+                                   utils.nplog(datum.scale/3.+x)) + (datum.obs[l,r]+alpha*x)/(datum.scale/3.+x))
                         hessian = hessian + frame.posterior[f] * (alpha * 
                                   (alpha*polygamma(1,datum.obs[l,r]+alpha*x) - alpha*polygamma(1,alpha*x) + 
                                   (datum.scale/3.+1)/(datum.scale/3.+x)) - (datum.total[l,r]+alpha*x)/(datum.scale/3.+x)**2)
@@ -1256,12 +1247,12 @@ cdef tuple beta_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, li
                 # add extra terms for last state
                 for l from 3*datum.M+f <= l < datum.L:
                     if datum.mappable[l,r]:
-                        func = func + frame.posterior[f] * (alpha*x*np.log(x) + 
+                        func = func + frame.posterior[f] * (alpha*x*utils.nplog(x) + 
                                gammaln(datum.obs[l,r]+alpha*x) - gammaln(alpha*x) - 
-                               (datum.obs[l,r]+alpha*x)*np.log(datum.scale/3.+x))
-                        gradient = gradient + frame.posterior[f] * (alpha * (np.log(x) + 
+                               (datum.obs[l,r]+alpha*x)*utils.nplog(datum.scale/3.+x))
+                        gradient = gradient + frame.posterior[f] * (alpha * (utils.nplog(x) + 
                                    1 + digamma(datum.obs[l,r]+alpha*x) - digamma(alpha*x) - 
-                                   np.log(datum.scale/3.+x)) + (datum.obs[l,r]+alpha*x)/(datum.scale/3.+x))
+                                   utils.nplog(datum.scale/3.+x)) + (datum.obs[l,r]+alpha*x)/(datum.scale/3.+x))
                         hessian = hessian + frame.posterior[f] * (alpha * 
                                   (alpha*polygamma(1,datum.obs[l,r]+alpha*x) - alpha*polygamma(1,alpha*x) + 
                                   (datum.scale/3.+1)/(datum.scale/3.+x)) - (datum.total[l,r]+alpha*x)/(datum.scale/3.+x)**2)
@@ -1365,36 +1356,36 @@ cdef tuple alpha_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, list s
             new_scale = rescale[r,s,datum.rescale_indices[r,f,:]]
             mask = new_scale!=0
             func = func + frame.max_posterior * np.sum(state.pos_first_moment[f,mask,s] * 
-                   (x*beta*np.log(beta) + gammaln(datum.total[f,mask,r]+x*beta) - 
-                    gammaln(x*beta) - (datum.total[f,mask,r]+x*beta)*np.log(datum.scale*new_scale+beta)))
+                   (x*beta*utils.nplog(beta) + gammaln(datum.total[f,mask,r]+x*beta) - 
+                    gammaln(x*beta) - (datum.total[f,mask,r]+x*beta)*utils.nplog(datum.scale*new_scale+beta)))
 
             gradient = gradient + frame.max_posterior[f] * np.sum(state.pos_first_moment[f,mask,s] * 
-                       (beta * (np.log(beta) + digamma(datum.total[f,mask,r]+x*beta) - 
-                        digamma(x*beta) - np.log(datum.scale*new_scale+beta))))
+                       (beta * (utils.nplog(beta) + digamma(datum.total[f,mask,r]+x*beta) - 
+                        digamma(x*beta) - utils.nplog(datum.scale*new_scale+beta))))
 
             if s==0:
 
                 # add extra terms for first state
                 for l from 0 <= l < f:
                     if datum.mappable[l,r]:
-                        func = func + frame.posterior[f] * (x*beta*np.log(beta) + 
+                        func = func + frame.posterior[f] * (x*beta*utils.nplog(beta) + 
                                gammaln(datum.obs[l,r]+x*beta) - gammaln(x*beta) - 
-                               (datum.obs[l,r]+x*beta) * np.log(datum.scale/3.+beta))
-                        gradient = gradient + frame.posterior[f] * beta * (np.log(beta) + 
+                               (datum.obs[l,r]+x*beta) * utils.nplog(datum.scale/3.+beta))
+                        gradient = gradient + frame.posterior[f] * beta * (utils.nplog(beta) + 
                                    digamma(datum.obs[l,r]+x*beta) - digamma(x*beta) - 
-                                   np.log(datum.scale/3.+beta))
+                                   utils.nplog(datum.scale/3.+beta))
 
             if s==8:
 
                 # add extra terms for last state
                 for l from 3*datum.M+f <= l < datum.L:
                     if datum.mappable[l,r]:
-                        func = func + frame.posterior[f] * (x*beta*np.log(beta) + 
+                        func = func + frame.posterior[f] * (x*beta*utils.nplog(beta) + 
                                gammaln(datum.obs[l,r]+x*beta) - gammaln(x*beta) - 
-                               (datum.obs[l,r]+x*beta) * np.log(datum.scale/3.+beta))
-                        gradient = gradient + frame.posterior[f] * beta * (np.log(beta) + 
+                               (datum.obs[l,r]+x*beta) * utils.nplog(datum.scale/3.+beta))
+                        gradient = gradient + frame.posterior[f] * beta * (utils.nplog(beta) + 
                                    digamma(datum.obs[l,r]+x*beta) - digamma(x*beta) - 
-                                   np.log(datum.scale/3.+beta))
+                                   utils.nplog(datum.scale/3.+beta))
 
     func = -1.*func
     gradient = -1.*gradient
@@ -1427,12 +1418,12 @@ cdef tuple alpha_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, l
             new_scale = rescale[r,s,datum.rescale_indices[r,f,:]]
             mask = new_scale!=0
             func = func + frame.max_posterior * np.sum(state.pos_first_moment[f,mask,s] * 
-                   (x*beta*np.log(beta) + gammaln(datum.total[f,mask,r]+x*beta) - 
-                    gammaln(x*beta) - (datum.total[f,mask,r]+x*beta)*np.log(datum.scale*new_scale+beta)))
+                   (x*beta*utils.nplog(beta) + gammaln(datum.total[f,mask,r]+x*beta) - 
+                    gammaln(x*beta) - (datum.total[f,mask,r]+x*beta)*utils.nplog(datum.scale*new_scale+beta)))
 
             gradient = gradient + frame.max_posterior[f] * np.sum(state.pos_first_moment[f,mask,s] * 
-                       (beta * (np.log(beta) + digamma(datum.total[f,mask,r]+x*beta) - 
-                        digamma(x*beta) - np.log(datum.scale*new_scale+beta))))
+                       (beta * (utils.nplog(beta) + digamma(datum.total[f,mask,r]+x*beta) - 
+                        digamma(x*beta) - utils.nplog(datum.scale*new_scale+beta))))
 
             hessian = hessian + frame.max_posterior[f] * np.sum(state.pos_first_moment[f,mask,s] * 
                       beta**2 * (polygamma(1,datum.total[f,mask,r]+x*beta) - 
@@ -1443,12 +1434,12 @@ cdef tuple alpha_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, l
                 # add extra terms for first state
                 for l from 0 <= l < f:
                     if datum.mappable[l,r]:
-                        func = func + frame.posterior[f] * (x*beta*np.log(beta) + 
+                        func = func + frame.posterior[f] * (x*beta*utils.nplog(beta) + 
                                gammaln(datum.obs[l,r]+x*beta) - gammaln(x*beta) - 
-                               (datum.obs[l,r]+x*beta) * np.log(datum.scale/3.+beta))
-                        gradient = gradient + frame.posterior[f] * beta * (np.log(beta) + 
+                               (datum.obs[l,r]+x*beta) * utils.nplog(datum.scale/3.+beta))
+                        gradient = gradient + frame.posterior[f] * beta * (utils.nplog(beta) + 
                                    digamma(datum.obs[l,r]+x*beta) - digamma(x*beta) - 
-                                   np.log(datum.scale/3.+beta))
+                                   utils.nplog(datum.scale/3.+beta))
                         hessian = hessian + frame.posterior[f] * beta**2 * 
                                   (polygamma(1,datum.obs[l,r]+x*beta) - polygamma(1,x*beta))
 
@@ -1457,12 +1448,12 @@ cdef tuple alpha_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, l
                 # add extra terms for last state
                 for l from 3*datum.M+f <= l < datum.L:
                     if datum.mappable[l,r]:
-                        func = func + frame.posterior[f] * (x*beta*np.log(beta) + 
+                        func = func + frame.posterior[f] * (x*beta*utils.nplog(beta) + 
                                gammaln(datum.obs[l,r]+x*beta) - gammaln(x*beta) - 
-                               (datum.obs[l,r]+x*beta) * np.log(datum.scale/3.+beta))
-                        gradient = gradient + frame.posterior[f] * beta * (np.log(beta) + 
+                               (datum.obs[l,r]+x*beta) * utils.nplog(datum.scale/3.+beta))
+                        gradient = gradient + frame.posterior[f] * beta * (utils.nplog(beta) + 
                                    digamma(datum.obs[l,r]+x*beta) - digamma(x*beta) - 
-                                   np.log(datum.scale/3.+beta))
+                                   utils.nplog(datum.scale/3.+beta))
                         hessian = hessian + frame.posterior[f] * beta**2 * 
                                   (polygamma(1,datum.obs[l,r]+x*beta) - polygamma(1,x*beta))
 
@@ -1532,6 +1523,8 @@ def learn_parameters(observations, codon_id, scales, mappability, restarts, mint
             # update periodicity parameters
             starttime = time.time()
             emission.update_periodicity(data, states, frames)
+            emission.update_beta(data, states, frames)
+            emission.update_alpha(data, states, frames)
             print "%.2f sec to update emission"%(time.time()-starttime)
 
             # update transition parameters
@@ -1554,49 +1547,18 @@ def learn_parameters(observations, codon_id, scales, mappability, restarts, mint
             reltol = dL/np.abs(L)
             print L, reltol, time.time()-totaltime
 
-        # update emission occupancy parameters, keeping all other parameters fixed
-        print "Keeping transition parameters fixed, update emission occupancy parameters ..."
-        emission.restrict = False
-
-        # update occupancy precision
-        starttime = time.time()
-        emission.update_beta(data, states, frames)
-        print "%.2f sec to update beta"%(time.time()-starttime)
-
-        # update occupancy mean
-        starttime = time.time()
-        emission.update_alpha(data, states, frames)
-        print "%.2f sec to update alpha"%(time.time()-starttime)
-
         # Next, keeping emission parameters fixed,
         # relax transitions to allow noncanonical codons
-        print "Keeping emission parameters fixed, estimating transition probabilities ..."
+        print "Relaxing transition probabilities ..."
         transition.restrict = False
-        starttime = time.time()
         transition.seqparam['start'][2:] = -5+np.random.rand(transition.seqparam['start'][2:].size)
 
-        # update likelihood with updated emission parameters
-        # update posterior of latent states with initialization of transition parameters
-        for datum,state,frame in zip(data,states,frames):
-            datum.compute_log_likelihood(emission)
-            state._forward_update(datum, transition)
-            state._reverse_update(datum, transition)
-            frame.update(datum, state)
-        transition.update(data, states, frames)
-        print "%.2f sec to update transition"%(time.time()-starttime)
-
-        # compute log likelihood
-        starttime = time.time()
+        # forward pass through latent states with initialization of transition parameters
         for datum,state in zip(data,states):
-            datum.compute_log_likelihood(emission)
             state._forward_update(datum, transition)
-        L = np.mean([(np.sum(frame.posterior*state.likelihood) \
-                + np.sum(frame.posterior*datum.extra_log_likelihood))/datum.L \
-                for datum,state,frame in zip(data,states,frames)])
-        print "%.2f sec to compute likelihood"%(time.time()-starttime)
 
         # Finally, update all parameters
-        print "Updating all parameters"
+        print "Updating all parameters ..."
         dL = np.inf
         reltol = np.abs(dL)/np.abs(L)
         while reltol>mintol:
