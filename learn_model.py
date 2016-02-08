@@ -1,9 +1,19 @@
+import argparse
+import cPickle
+import warnings
+import pdb
+
 import numpy as np
+
 import load_data
 import ribohmm
-import argparse
+import seq
 import utils
-import pdb
+
+# ignore warnings with these expressions
+warnings.filterwarnings('ignore', '.*overflow encountered.*',)
+warnings.filterwarnings('ignore', '.*divide by zero.*',)
+warnings.filterwarnings('ignore', '.*invalid value.*',)
 
 def parse_args():
     parser = argparse.ArgumentParser(description=" learns the parameters of riboHMM to infer translation "
@@ -19,6 +29,11 @@ def parse_args():
                         type=float,
                         default=1e-4,
                         help="convergence criterion for change in per-base marginal likelihood (default: 1e-4)")
+
+    parser.add_argument("--scale_beta",
+                        type=float,
+                        default=10000.,
+                        help="scaling factor for initial precision values (default: 1e4)")
 
     parser.add_argument("--batch",
                         type=int,
@@ -70,12 +85,13 @@ def select_transcripts(options):
 
     # get translation level in all transcripts
     ribo_track = load_data.RiboSeq(options.riboseq_file)
-    transcript_total_counts = ribo_track.get_total_counts(transcript_models)
+    transcript_translation_rate = [c/float(t.mask.sum()) for c,t in 
+        zip(ribo_track.get_total_counts(transcript_models), transcript_models)]
 
     # select top transcripts
     transcripts = []
     transcript_bounds = dict()
-    order = np.argsort(transcript_total_counts)[::-1]
+    order = np.argsort(transcript_translation_rate)[::-1]
     for index in order:
         transcript = transcript_models[index]
  
@@ -116,22 +132,14 @@ def learn(options):
     T = len(transcripts)
     print "%d transcripts selected"%T
 
-    # load pre-computed Kozak model
-    kozak_model = np.load("data/kozak_model.npz")
-    freq = dict([(char,row) for char,row in zip(['A','U','G','C'], kozak_model['freq'])])
-    altfreq = dict([(char,row) for char,row in zip(['A','U','G','C'], kozak_model['altfreq'])])
-    for char in ['A','U','G','C']:
-        freq[char][9:12] = altfreq[char][9:12]
-
     # load sequence of transcripts and transform sequence data
     genome_track = load_data.Genome(options.fasta_file, options.mappability_file)
-    rna_sequences = genome_track.get_sequence(transcripts)
-    codon_id = [dict([('kozak',utils.compute_kozak_scores(sequence, freq, altfreq)), \
-        ('start',utils.mark_start_codons(sequence)), \
-        ('stop',utils.mark_stop_codons(sequence))]) \
-        for sequence in rna_sequences]
-    total_bases = np.sum([len(seq) for seq in rna_sequences])
-    del rna_sequences
+    codon_flags = []
+    total_bases = 0
+    for rna_sequence in genome_track.get_sequence(transcripts):
+        sequence = seq.RnaSequence(rna_sequence)
+        codon_flags.append(sequence.mark_codons())
+        total_bases += len(rna_sequence)
     print "%d bases covered"%total_bases
 
     # load footprint count data in transcripts
@@ -159,13 +167,16 @@ def learn(options):
     for i,r in enumerate(utils.READ_LENGTHS):
         print "%d bases have missing counts for %d bp footprints"%(np.sum([m.shape[0]-np.sum(m[:,i]) for m in rna_mappability]),r)
 
-    pdb.set_trace()
     # run the learning algorithm
-    transition, emission = ribohmm.learn_parameters(footprint_counts, codon_id, \
-        rna_counts, rna_mappability, options.restarts, options.mintol)
+    transition, emission, L = ribohmm.learn_parameters(footprint_counts, codon_flags, \
+                           rna_counts, rna_mappability, options.scale_beta, \
+                           options.restarts, options.mintol)
 
     # output model parameters
-
+    handle = open(options.model_file,'w')
+    cPickle.Pickler(handle,protocol=2).dump(transition)
+    cPickle.Pickler(handle,protocol=2).dump(emission)
+    handle.close()
 
 if __name__=="__main__":
 

@@ -9,7 +9,9 @@ class Genome():
 
     def __init__(self, fasta_filename, map_filename):
 
-        self._seq_handle = pysam.Fastafile(fasta_filename)
+        self._seq_handle = pysam.FastaFile(fasta_filename)
+        self._map_handles = [pysam.TabixFile(map_filename+'_%d.gz'%r) 
+                            for r in utils.READ_LENGTHS]
 
     def get_sequence(self, transcripts):
 
@@ -36,19 +38,50 @@ class Genome():
 
     def get_mappability(self, transcripts):
 
-        raise NotImplementedError
+        mappabilities = []
+        for transcript in transcripts:
 
+            # get mappable positions
+            mappables = [np.zeros(transcript.mask.shape, dtype='bool') 
+                         for r in utils.READ_LENGTHS]
+            tbx_iters = [handle.fetch(transcript.chromosome, transcript.start, transcript.stop)
+                         for handle in self._map_handles]
+            if transcript.strand=='+':
+                offsets = [1,1,1,1]
+            else:
+                offsets = utils.READ_LENGTHS
+
+            for tbx_iter,mappable,offset in zip(tbx_iters,mappables,offsets):
+
+                for tbx in tbx_iter:
+
+                    row = tbx.split('\t')
+                    start = int(row[1]) - transcript.start + offset - 1
+                    end = int(row[2]) - transcript.start + offset - 1
+                    mappable[start:end] = True
+
+            if transcript.strand=='+':
+                mappables = np.array(mappables).T.astype('bool')
+            else:
+                mappables = np.array(mappables).T.astype('bool')[::-1]
+
+            mappabilities.append(mappables[transcript.mask,:])
+
+        return mappabilities
+            
     def close(self):
 
         self._seq_handle.close()
-        #self._map_handle.close()
+        ig = [handle.close() for handle in self._map_handles]
 
 class RiboSeq():
 
     def __init__(self, file_prefix):
 
-        self._fwd_handles = [pysam.Tabixfile(file_prefix+'_fwd.%d.gz'%r) for r in utils.READ_LENGTHS]
-        self._rev_handles = [pysam.Tabixfile(file_prefix+'_rev.%d.gz'%r) for r in utils.READ_LENGTHS]
+        self._fwd_handles = [pysam.TabixFile(file_prefix+'_fwd.%d.gz'%r) 
+                             for r in utils.READ_LENGTHS]
+        self._rev_handles = [pysam.TabixFile(file_prefix+'_rev.%d.gz'%r) 
+                             for r in utils.READ_LENGTHS]
 
     def get_counts(self, transcripts):
 
@@ -77,7 +110,7 @@ class RiboSeq():
             else:
                 rcounts = np.array(rcounts).T.astype(np.uint64)[::-1]
 
-            read_counts.append(rcounts)
+            read_counts.append(rcounts[transcript.mask,:])
 
         return read_counts
 
@@ -89,10 +122,29 @@ class RiboSeq():
 
     def get_exon_total_counts(self, transcripts):
 
-        read_counts = self.get_counts(transcripts)
         exon_counts = []
-        for transcript,counts in zip(transcripts,read_counts):
-            exon_counts.append(np.array([counts[start:end,:].sum() for start,end in transcript.exons]))
+        for transcript in transcripts:
+
+            rcounts = [np.zeros(transcript.mask.shape, dtype='int') for r in utils.READ_LENGTHS]
+            if transcript.strand=='+':
+                tbx_iters = [handle.fetch(transcript.chromosome, transcript.start, transcript.stop) \
+                    for handle in self._fwd_handles]
+            else:
+                tbx_iters = [handle.fetch(transcript.chromosome, transcript.start, transcript.stop) \
+                    for handle in self._rev_handles]
+
+            for tbx_iter,counts in zip(tbx_iters,rcounts):
+
+                for tbx in tbx_iter:
+
+                    row = tbx.split('\t')
+                    count = int(row[3])
+                    asite = int(row[1]) - transcript.start
+                    counts[asite] = count
+
+            rcounts = np.array(rcounts).T.astype(np.uint64)
+            exon_counts.append(np.array([rcounts[start:end,:].sum() 
+                               for start,end in transcript.exons]))
 
         return exon_counts
 
@@ -105,8 +157,10 @@ class RnaSeq():
 
     def __init__(self, filename):
 
-        self._handle = pysam.Tabixfile(filename+'.gz')
-        self.total = reduce(lambda x,y: x+y, (int(tbx.split('\t')[3]) for tbx in self._handle.fetch()))
+        self._handle = pysam.TabixFile(filename+'.gz')
+        self.total = 0
+        for chrom in self._handle.contigs:
+            self.total += reduce(lambda x,y: x+y, (int(tbx.split('\t')[3]) for tbx in self._handle.fetch(chrom)))
 
     def get_total_counts(self, transcripts):
 
@@ -251,12 +305,9 @@ def load_gtf(filename):
         
         except KeyError:
 
-            if not data[2]=='transcript':
-                print "unknown annotation; poor ordering"
-                pdb.set_trace()
-
-            # initialize new transcript
-            transcripts[transcript_id] = Transcript(data, attr)
+            if data[2]=='transcript':
+                # initialize new transcript
+                transcripts[transcript_id] = Transcript(data, attr)
                 
     handle.close()
 

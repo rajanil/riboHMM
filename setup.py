@@ -10,16 +10,26 @@ import sys
 # py setup.py build_ext --inplace
 # py setup.py install
 
-# setup bed parser
-ext_modules = [Extension("ribohmm", sources=["ribohmm.pyx"], libraries=["gsl","gslcblas"],
-                extra_compile_args=["-O3"])]
-ext_modules = cythonize(ext_modules, compiler_directives={'embedsignature': True})
+# setup sequence class
+ext_modules = [Extension("seq", ["seq.pyx"])]
 
 setup(
-    name = 'ribohmm',
-    author = 'Anil Raj',
-    version = '1.0',
+    name = 'seq',
     cmdclass = {'build_ext': build_ext},
     include_dirs=[numpy.get_include(), '.'],
     ext_modules = ext_modules
 )
+
+# setup ribohmm
+#ext_modules = [Extension("ribohmm", sources=["ribohmm.pyx"],
+#               extra_compile_args=["-O3"])]
+#ext_modules = cythonize(ext_modules, compiler_directives={'embedsignature': True})
+ext_modules = [Extension("ribohmm", sources=["ribohmm.pyx"])]
+
+setup(
+    name = 'ribohmm',
+    cmdclass = {'build_ext': build_ext},
+    include_dirs=[numpy.get_include(), '.'],
+    ext_modules = ext_modules
+)
+

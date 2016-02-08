@@ -1,5 +1,6 @@
 import numpy as np
 import pysam
+import subprocess
 import argparse
 import utils
 import os, pdb
@@ -21,7 +22,28 @@ def parse_args():
 
     options = parser.parse_args()
 
+    options.bgzip = which("bgzip")
+    options.tabix = which("tabix")
+
     return options
+
+def which(program):
+
+    def is_exe(fpath):
+        return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
+
+    fpath, fname = os.path.split(program)
+    if fpath:
+        if is_exe(program):
+            return program
+    else:
+        for path in os.environ["PATH"].split(os.pathsep):
+            path = path.strip('"')
+            exe_file = os.path.join(path, program)
+            if is_exe(exe_file):
+                return exe_file
+
+    return None
 
 def convert_rnaseq(options):
 
@@ -67,10 +89,16 @@ def convert_rnaseq(options):
     sam_handle.close()
     count_handle.close()
 
+    # compress count file
+    pipe = subprocess.Popen("%s -f %s"%(options.bgzip, count_file), \
+        stdout=subprocess.PIPE, shell=True)
+    stdout = pipe.communicate()[0]
+
     # index count file
-    bgz_file = pysam.tabix_index(count_file, force=True, \
-        zerobased=True, seq_col=1, start_col=2, end_col=3)
-    print "Compressed file with RNA-seq counts is %s"%bgz_file
+    pipe = subprocess.Popen("%s -f -b 2 -e 3 -0 %s.gz"%(options.tabix, count_file), \
+        stdout=subprocess.PIPE, shell=True)
+    stdout = pipe.communicate()[0]
+    print "Compressed file with RNA-seq counts is %s"%(count_file+'.gz')
 
 
 def convert_riboseq(options):
@@ -105,13 +133,13 @@ def convert_riboseq(options):
                 continue
             
             if read.is_reverse:
-                asite = int(read.positions[-11])
+                asite = int(read.positions[-13])
                 try:
                     rev_counts[read.rlen][asite] += 1
                 except KeyError:
                     rev_counts[read.rlen][asite] = 1
             else:
-                asite = int(read.positions[11])
+                asite = int(read.positions[12])
                 try:
                     fwd_counts[read.rlen][asite] += 1
                 except KeyError:
@@ -135,13 +163,24 @@ def convert_riboseq(options):
         rev_handle[r].close()
 
     for r in utils.READ_LENGTHS:
+
+        # compress count file
+        pipe = subprocess.Popen("%s -f %s.%d"%(options.bgzip, fwd_count_file, r), \
+            stdout=subprocess.PIPE, shell=True)
+        stdout = pipe.communicate()[0]
+        pipe = subprocess.Popen("%s -f %s.%d"%(options.bgzip, rev_count_file, r), \
+            stdout=subprocess.PIPE, shell=True)
+        stdout = pipe.communicate()[0]
+
         # index count file
-        bgz_file = pysam.tabix_index(fwd_count_file+'.%d'%r, \
-            force=True, zerobased=True, seq_col=1, start_col=2, end_col=3)
-        print "Compressed file with ribosome footprint counts on forward strand is %s"%bgz_file
-        bgz_file = pysam.tabix_index(rev_count_file+'.%d'%r, \
-            force=True, zerobased=True, seq_col=1, start_col=2, end_col=3)
-        print "Compressed file with ribosome footprint counts on reverse strand is %s"%bgz_file
+        pipe = subprocess.Popen("%s -f -b 2 -e 3 -0 %s.%d.gz"%(options.tabix, fwd_count_file, r), \
+            stdout=subprocess.PIPE, shell=True)
+        stdout = pipe.communicate()[0]
+        pipe = subprocess.Popen("%s -f -b 2 -e 3 -0 %s.%d.gz"%(options.tabix, rev_count_file, r), \
+            stdout=subprocess.PIPE, shell=True)
+        stdout = pipe.communicate()[0]
+        print "Compressed file with ribosome footprint counts on forward strand is %s"%(fwd_count_file+'.%d.gz'%r)
+        print "Compressed file with ribosome footprint counts on reverse strand is %s"%(rev_count_file+'.%d.gz'%r)
 
 if __name__=="__main__":
 

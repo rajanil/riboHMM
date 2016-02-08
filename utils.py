@@ -3,15 +3,7 @@ import re
 
 READ_LENGTHS = [28, 29, 30, 31]
 STARTCODONS = ['AUG','CUG','GUG','UUG','AAG','ACG','AGG','AUA','AUC','AUU']
-STARTS = dict([(s,i+1) for i,s in enumerate(STARTCODONS)])
-STARTRE = [re.compile(s) for s in STARTCODONS]
 STOPCODONS = ['UAA','UAG','UGA']
-STOPS = dict([(s,i+1) for i,s in enumerate(STOPCODONS)])
-STOPRE = [re.compile(s) for s in STOPCODONS]
-
-def debinarize(mask):
-
-    return np.sum(2**np.where(mask[::-1])[0])
 
 binarize = dict([(0,np.array([False,False,False])),
                  (1,np.array([False,False,True])),
@@ -23,62 +15,13 @@ binarize = dict([(0,np.array([False,False,False])),
                  (7,np.array([True,True,True]))
                 ])
 
-def mark_start_codons(sequence):
-
-    offset = 3
-    S = len(sequence)
-    start_index = np.zeros((3,S/3-1),dtype=np.uint8)
-    for f in xrange(3):
-        for start,startre in zip(STARTCODONS,STARTRE):
-            ig = [start_index[f].__setitem__(s,STARTS[start]) for s in xrange(0,(S-f)/3-1) \
-                if startre.search(sequence[3*s+offset+f:3*s+3+offset+f]) is not None]
-        for stopre in STOPRE:
-            ig = [start_index[f].__setitem__(s,0) for s in xrange(0,(S-f)/3-2) \
-                if stopre.search(sequence[3*s+3+offset+f:3*s+6+offset+f]) is not None]
-            ig = [start_index[f].__setitem__(s,0) for s in xrange(0,(S-f)/3-3) \
-                if stopre.search(sequence[3*s+6+offset+f:3*s+9+offset+f]) is not None]
-            ig = [start_index[f].__setitem__(s,0) for s in xrange(0,(S-f)/3-4) \
-                if stopre.search(sequence[3*s+9+offset+f:3*s+12+offset+f]) is not None]
-            ig = [start_index[f].__setitem__(s,0) for s in xrange(0,(S-f)/3-5) \
-                if stopre.search(sequence[3*s+12+offset+f:3*s+15+offset+f]) is not None]
-    
-    return start_index.T
-
-def mark_stop_codons(sequence):
-
-    offset = 6
-    S = len(sequence)
-    stop_index = np.zeros((3,S/3-1),dtype=np.uint8)
-    for f in xrange(3):
-        for stop,stopre in zip(STOPCODONS,STOPRE):
-            ig = [stop_index[f].__setitem__(s,STOPS[stop]) for s in xrange(0,(S-f)/3-2) \
-                if stopre.search(sequence[3*s+offset+f:3*s+3+offset+f]) is not None]
-    
-    return stop_index.T
-
-def compute_kozak_scores(sequence, freq, altfreq):
-
-    offset = 3
-    S = len(sequence)
-    score = np.zeros((S/3-1,3),dtype=float)
-    for f in xrange(3):
-        for s in xrange(2,(S-f-4-offset)/3):
-            try:
-                score[s,f] = pwm_score(sequence[3*s+offset+f-9:3*s+offset+f+4], freq, altfreq)
-            except (KeyError, IndexError):
-                pass
- 
-    return score
-
-def pwm_score(seq, signal, backgnd):
-
-    return reduce(lambda x,y: x+y, [np.log2(signal[s][i])-np.log2(backgnd[s][i]) for i,s in enumerate(seq)])
+debinarize = dict([(val.tostring(),key) for key,val in binarize.iteritems()])
 
 # some essential functions
 insum = lambda x,axes: np.apply_over_axes(np.sum,x,axes)
 nplog = lambda x: np.nan_to_num(np.log(x))
 andop = lambda x: reduce(lambda y,z: np.logical_and(y,z), x)
-EPS = np.finfo(np.double).tiny
+EPS = np.finfo(np.double).resolution
 MAX = np.finfo(np.double).max
 MIN = np.finfo(np.double).min
 

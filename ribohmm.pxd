@@ -52,16 +52,18 @@ cdef class Emission:
     cdef public long S, R
     cdef public np.ndarray periodicity, logperiodicity, rate_alpha, rate_beta, rescale
 
+    cdef update_beta(self, list data, list states, list frames, double reltol)
+
+    cdef np.ndarray _beta_map(self, np.ndarray beta, list data, list states, list frames, np.ndarray denom)
+
+    cdef np.ndarray _square_beta_map(self, np.ndarray beta, list data, list states, list frames, np.ndarray denom)
+
 cdef double normalize(np.ndarray[np.float64_t, ndim=1] x)
 
 cdef tuple transition_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, bool restrict)
 
 cdef tuple transition_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, bool restrict)
 
-cdef tuple beta_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, list constants)
+cdef tuple alpha_func_grad(np.ndarray[np.float64_t, ndim=1] xx, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, np.ndarray[np.float64_t, ndim=2] beta)
 
-cdef tuple beta_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, list constants)
-
-cdef tuple alpha_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, list constants)
-
-cdef tuple alpha_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, list constants)
+cdef tuple alpha_func_grad_hess(np.ndarray[np.float64_t, ndim=1] xx, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, np.ndarray[np.float64_t, ndim=2] beta)
