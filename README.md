@@ -147,7 +147,7 @@ and is not likely to affect the accuracy of inference significantly.
 
 ## Learning the model
 
-To learn the model parameters, you will need to execute `learn_model.py`.
+To learn the model parameters, you will need to use `learn_model.py`.
 
 To see command-line options that need to be passed to this script, you can do the following:
 
@@ -201,7 +201,7 @@ As an example, we can learn the model parameters using test transcripts by runni
 
 ## Inferring translated sequences
 
-To infer translated sequences, you will need to execute `infer_CDS.py`.
+To infer translated sequences, you will need to use `infer_CDS.py`.
 
 To see command-line options that need to be passed to this script, you can do the following:
 
