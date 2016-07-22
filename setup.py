@@ -6,10 +6,6 @@ from Cython.Distutils import build_ext
 import numpy
 import sys
 
-# to run
-# py setup.py build_ext --inplace
-# py setup.py install
-
 # setup sequence class
 ext_modules = [Extension("seq", ["seq.pyx"])]
 
@@ -21,9 +17,6 @@ setup(
 )
 
 # setup ribohmm
-#ext_modules = [Extension("ribohmm", sources=["ribohmm.pyx"],
-#               extra_compile_args=["-O3"])]
-#ext_modules = cythonize(ext_modules, compiler_directives={'embedsignature': True})
 ext_modules = [Extension("ribohmm", sources=["ribohmm.pyx"])]
 
 setup(

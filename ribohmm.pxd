@@ -6,11 +6,11 @@ cdef class Data:
 
     cdef public long L, R, M
     cdef public double scale
-    cdef public np.ndarray obs, total, mappable, rescale_indices
-    cdef public np.ndarray log_likelihood, extra_log_likelihood
+    cdef public np.ndarray obs, total, mappable, missingness_type
+    cdef public np.ndarray log_probability, extra_log_probability
     cdef public dict codon_id
 
-    cdef compute_log_likelihood(self, Emission emission)
+    cdef compute_log_probability(self, Emission emission)
 
 
 cdef class Frame:
@@ -64,6 +64,6 @@ cdef tuple transition_func_grad(np.ndarray[np.float64_t, ndim=1] x, list data, l
 
 cdef tuple transition_func_grad_hess(np.ndarray[np.float64_t, ndim=1] x, list data, list states, list frames, bool restrict)
 
-cdef tuple alpha_func_grad(np.ndarray[np.float64_t, ndim=1] xx, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, np.ndarray[np.float64_t, ndim=2] beta)
+cdef tuple alpha_func_grad(np.ndarray[np.float64_t, ndim=2] xx, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, np.ndarray[np.float64_t, ndim=2] beta)
 
-cdef tuple alpha_func_grad_hess(np.ndarray[np.float64_t, ndim=1] xx, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, np.ndarray[np.float64_t, ndim=2] beta)
+cdef tuple alpha_func_grad_hess(np.ndarray[np.float64_t, ndim=2] xx, list data, list states, list frames, np.ndarray[np.float64_t, ndim=3] rescale, np.ndarray[np.float64_t, ndim=2] beta)

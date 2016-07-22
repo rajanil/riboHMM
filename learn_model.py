@@ -38,7 +38,7 @@ def parse_args():
     parser.add_argument("--batch",
                         type=int,
                         default=1000,
-                        help="number of transcripts used for learning model parameters.")
+                        help="number of transcripts used for learning model parameters (default: 1000)")
 
     parser.add_argument("--model_file",
                         type=str,

@@ -23,7 +23,7 @@ def parse_args():
     parser.add_argument("--output_file",
                         type=str,
                         default=None,
-                        help="output file name to store the model parameters")
+                        help="output file containing the model parameters")
 
     parser.add_argument("--rnaseq_file",
                         type=str,
@@ -37,7 +37,7 @@ def parse_args():
 
     parser.add_argument("model_file",
                         action="store",
-                        help="file name to the model parameters")
+                        help="file name containing the model parameters")
 
     parser.add_argument("fasta_file",
                         action="store",
